@@ -2,7 +2,12 @@
 
 Minimal isolated worker template for Lead Scraper.
 
-It accepts jobs from Grantly, fetches public pages with bounded limits, extracts simple lead candidates without AI, and posts results back to the module callback endpoint.
+It supports two dispatch styles:
+
+- GitHub Actions workflow dispatch, using `.github/workflows/lead-scraper.yml`
+- Always-on HTTP worker, using `src/server.mjs`
+
+Both fetch public pages with bounded limits, extract simple lead candidates without AI, and post results back to the module callback endpoint.
 
 ## Environment
 
@@ -11,9 +16,9 @@ It accepts jobs from Grantly, fetches public pages with bounded limits, extracts
 
 ## Tokens
 
-This worker does not need a GitHub Personal Access Token.
+The GitHub Actions mode needs a GitHub Personal Access Token in Grantly, stored as `lead_scraper_github_pat`.
 
-Use a random shared secret for `WORKER_TOKEN`, for example:
+The always-on HTTP mode does not need a GitHub PAT. Use a random shared secret for `WORKER_TOKEN`, for example:
 
 ```bash
 openssl rand -hex 32

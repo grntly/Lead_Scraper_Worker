@@ -1,0 +1,47 @@
+name: Lead Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Lead Scraper run ID"
+        required: true
+      source_json:
+        description: "Source JSON"
+        required: true
+      parameters_json:
+        description: "Parameters JSON"
+        required: true
+      callback_url:
+        description: "Callback URL"
+        required: true
+      callback_token:
+        description: "Callback token"
+        required: true
+      user_agent:
+        description: "User agent"
+        required: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run lead scraper
+        env:
+          RUN_ID: ${{ github.event.inputs.run_id }}
+          SOURCE_JSON: ${{ github.event.inputs.source_json }}
+          PARAMETERS_JSON: ${{ github.event.inputs.parameters_json }}
+          CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
+          USER_AGENT: ${{ github.event.inputs.user_agent }}
+        run: node .github/scripts/run-dispatch.mjs
