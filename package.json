@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "check": "node --check src/server.mjs && node --check .github/scripts/run-dispatch.mjs",
     "start": "node src/server.mjs"
   },
   "dependencies": {}
 }
-

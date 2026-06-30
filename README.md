@@ -17,6 +17,23 @@ Both fetch public pages with bounded limits, extract simple lead candidates with
 ## Tokens
 
 The GitHub Actions mode needs a GitHub Personal Access Token in Grantly, stored as `lead_scraper_github_pat`.
+The workflow file must exist on the repository default branch, usually `main`.
+GitHub returns `404 Not Found` for workflow dispatch when `.github/workflows/lead-scraper.yml` only exists on `dev`, even if the dispatch `ref` is set to `dev`.
+
+Recommended Grantly options for GitHub Actions mode:
+
+- `lead_scraper_worker_mode`: `github`
+- `lead_scraper_github_owner`: GitHub owner or organization
+- `lead_scraper_github_repo`: worker repository name
+- `lead_scraper_github_workflow`: `lead-scraper.yml`
+- `lead_scraper_github_ref`: `main`
+- `lead_scraper_github_pat`: token with Actions workflow dispatch access
+
+You can also set `lead_scraper_remote_worker_url` directly to:
+
+```text
+https://api.github.com/repos/<owner>/<repo>/actions/workflows/lead-scraper.yml/dispatches
+```
 
 The always-on HTTP mode does not need a GitHub PAT. Use a random shared secret for `WORKER_TOKEN`, for example:
 
