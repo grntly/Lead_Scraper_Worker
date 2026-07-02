@@ -1,10 +1,10 @@
 {
   "name": "lead-scraper-worker",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "type": "module",
+  "private": true,
   "scripts": {
-    "check": "node --check src/server.mjs && node --check .github/scripts/run-dispatch.mjs",
-    "start": "node src/server.mjs"
-  },
-  "dependencies": {}
+    "start": "node .github/scripts/run-dispatch.mjs",
+    "test": "node --check .github/scripts/run-dispatch.mjs && node --check src/lead_scrape.mjs"
+  }
 }

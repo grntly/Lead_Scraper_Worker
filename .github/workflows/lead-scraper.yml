@@ -1,31 +1,46 @@
-name: Lead Scraper
+name: Lead Scraper Worker
 
 on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: "Lead Scraper run ID"
+        description: "Grantly Lead Scraper run ID"
         required: true
-      source_json:
-        description: "Source JSON"
+      source_id:
+        description: "Grantly Lead Scraper source ID"
         required: true
-      parameters_json:
-        description: "Parameters JSON"
+      source_name:
+        description: "Source name"
+        required: false
+      list_url:
+        description: "Public list URL to fetch"
         required: true
+      base_url:
+        description: "Base URL for relative links"
+        required: false
+      config_json:
+        description: "Selector/config JSON"
+        required: false
+      criteria_json:
+        description: "Criteria JSON"
+        required: false
       callback_url:
-        description: "Callback URL"
+        description: "Grantly callback URL"
         required: true
       callback_token:
-        description: "Callback token"
+        description: "Callback bearer token"
         required: true
-      user_agent:
-        description: "User agent"
+      max_pages:
+        description: "Maximum pages to inspect"
+        required: false
+      timeout_seconds:
+        description: "HTTP timeout in seconds"
         required: false
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -34,14 +49,22 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 20
+
+      - name: Validate worker
+        run: node --check .github/scripts/run-dispatch.mjs && node --check src/lead_scrape.mjs
 
       - name: Run lead scraper
         env:
           RUN_ID: ${{ github.event.inputs.run_id }}
-          SOURCE_JSON: ${{ github.event.inputs.source_json }}
-          PARAMETERS_JSON: ${{ github.event.inputs.parameters_json }}
+          SOURCE_ID: ${{ github.event.inputs.source_id }}
+          SOURCE_NAME: ${{ github.event.inputs.source_name }}
+          LIST_URL: ${{ github.event.inputs.list_url }}
+          BASE_URL: ${{ github.event.inputs.base_url }}
+          CONFIG_JSON: ${{ github.event.inputs.config_json }}
+          CRITERIA_JSON: ${{ github.event.inputs.criteria_json }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
           CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
-          USER_AGENT: ${{ github.event.inputs.user_agent }}
+          MAX_PAGES: ${{ github.event.inputs.max_pages }}
+          TIMEOUT_SECONDS: ${{ github.event.inputs.timeout_seconds }}
         run: node .github/scripts/run-dispatch.mjs
