@@ -184,6 +184,74 @@ function extractLinks(html, baseUrl) {
   return links;
 }
 
+function extractCells(rowHtml) {
+  const cells = [];
+  const regex = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi;
+  let match;
+
+  while ((match = regex.exec(String(rowHtml || ''))) !== null) {
+    const cellHtml = match[1];
+    const linkMatch = cellHtml.match(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i);
+    cells.push({
+      text: stripTags(cellHtml),
+      link: linkMatch ? linkMatch[1] : '',
+      linkText: linkMatch ? stripTags(linkMatch[2]) : '',
+    });
+  }
+
+  return cells;
+}
+
+function extractTableRows(html, baseUrl) {
+  const rows = [];
+  const regex = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+  let match;
+
+  while ((match = regex.exec(String(html || ''))) !== null) {
+    const cells = extractCells(match[1]);
+    if (cells.length < 2) {
+      continue;
+    }
+
+    const companyCell = cells.find((cell) => {
+      const text = cell.text.trim();
+      return text !== ''
+        && !/^(bedrijfsnaam|company|organisatie|naam|2022|2023|score|rank|positie)$/i.test(text)
+        && !/^\d+$/.test(text)
+        && !/^\d+([.,]\d+)?%$/.test(text);
+    });
+
+    if (!companyCell) {
+      continue;
+    }
+
+    const rankCell = cells.find((cell) => /^\d+$/.test(cell.text.trim()));
+    const scoreCell = cells.find((cell) => /^\d+([.,]\d+)?%$/.test(cell.text.trim()));
+    let sourceUrl = baseUrl;
+
+    if (companyCell.link) {
+      try {
+        sourceUrl = new URL(companyCell.link, baseUrl).toString();
+      } catch {
+        sourceUrl = baseUrl;
+      }
+    }
+
+    rows.push({
+      company_name: companyCell.linkText || companyCell.text,
+      source_url: sourceUrl,
+      rank: rankCell ? Number(rankCell.text.trim()) : null,
+      table_score_text: scoreCell ? scoreCell.text.trim() : '',
+      raw_cells: cells.map((cell) => cell.text),
+    });
+  }
+
+  return rows.filter((row, index, all) => {
+    const key = row.company_name.toLowerCase();
+    return key !== '' && all.findIndex((candidate) => candidate.company_name.toLowerCase() === key) === index;
+  });
+}
+
 function patternMatches(pattern, value) {
   const raw = String(pattern || '').trim();
   if (!raw) {
@@ -353,6 +421,60 @@ function emailPatternHint(pattern, website) {
   }
 }
 
+function buildLeadFromTableRow({ row, sourceName, pageUrl, criteria }) {
+  const descriptionParts = [];
+  if (row.rank) {
+    descriptionParts.push(`Ranking positie ${row.rank}`);
+  }
+  if (row.table_score_text) {
+    descriptionParts.push(`Score ${row.table_score_text}`);
+  }
+  descriptionParts.push(`Gevonden in ${sourceName || 'publieke ranking'}.`);
+
+  const scoreNumber = row.table_score_text
+    ? Number(String(row.table_score_text).replace('%', '').replace(',', '.'))
+    : NaN;
+  const baseScore = Number.isFinite(scoreNumber) ? Math.round(Math.max(0, Math.min(100, scoreNumber))) : null;
+  const haystack = `${row.company_name} ${descriptionParts.join(' ')}`.toLowerCase();
+  const matchedBranches = findMatchingTerms(criteria.branches, haystack);
+  const matchedKeywords = findMatchingTerms(criteria.keywords, haystack);
+  const excluded = findMatchingTerms(criteria.exclude_keywords, haystack);
+  let criteriaScore = baseScore !== null ? baseScore : 60;
+  const reasons = [];
+
+  if (row.rank) reasons.push(`ranking positie ${row.rank}`);
+  if (row.table_score_text) reasons.push(`ranking score ${row.table_score_text}`);
+  if (matchedBranches.length) {
+    criteriaScore += Math.min(10, matchedBranches.length * 5);
+    reasons.push(`branche-match: ${matchedBranches.join(', ')}`);
+  }
+  if (matchedKeywords.length) {
+    criteriaScore += Math.min(10, matchedKeywords.length * 5);
+    reasons.push(`keywords: ${matchedKeywords.join(', ')}`);
+  }
+  if (excluded.length) {
+    criteriaScore -= 30;
+    reasons.push(`uitsluiting: ${excluded.join(', ')}`);
+  }
+
+  criteriaScore = Math.max(0, Math.min(100, criteriaScore));
+
+  return {
+    company_name: row.company_name,
+    website: row.source_url || pageUrl,
+    industry: matchedBranches[0] || 'ICT / software',
+    description: descriptionParts.join('; '),
+    criteria_score: criteriaScore,
+    criteria_reason: reasons.join('; ') || 'gevonden in rankingtabel',
+    enrichment_links: row.source_url && row.source_url !== pageUrl
+      ? [{ link_type: 'source', url: row.source_url, title: row.company_name }]
+      : [],
+    source_url: row.source_url || pageUrl,
+    raw_payload: row,
+    status: 'new',
+  };
+}
+
 async function fetchHtml(url, timeoutSeconds) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutSeconds * 1000);
@@ -482,35 +604,48 @@ export async function runLeadScrape(payload) {
 
   const baseUrl = payload.base_url || startUrl.toString();
   const baseHost = new URL(baseUrl).hostname.replace(/^www\./, '');
-  const links = filterLinks(extractLinks(first.body, baseUrl), config, baseHost)
-    .slice(0, Math.max(0, maxPages - 1));
+  const tableRows = extractTableRows(first.body, first.url);
 
-  leads.push(buildLeadFromPage({
-    sourceName: payload.source_name,
-    url: first.url,
-    html: first.body,
-    config,
-    criteria,
-  }));
+  if (tableRows.length > 0) {
+    for (const row of tableRows.slice(0, 150)) {
+      leads.push(buildLeadFromTableRow({
+        row,
+        sourceName: payload.source_name,
+        pageUrl: first.url,
+        criteria,
+      }));
+    }
+  } else {
+    const links = filterLinks(extractLinks(first.body, baseUrl), config, baseHost)
+      .slice(0, Math.max(0, maxPages - 1));
 
-  for (const link of links) {
-    try {
-      await assertPublicUrl(link.url);
-      const page = await fetchHtml(link.url, timeoutSeconds);
-      fetched.push(page.url);
-      if (page.ok) {
-        leads.push(buildLeadFromPage({
-          sourceName: link.text || payload.source_name,
-          url: page.url,
-          html: page.body,
-          config,
-          criteria,
-        }));
-      } else {
-        errors.push(`HTTP ${page.status}: ${link.url}`);
+    leads.push(buildLeadFromPage({
+      sourceName: payload.source_name,
+      url: first.url,
+      html: first.body,
+      config,
+      criteria,
+    }));
+
+    for (const link of links) {
+      try {
+        await assertPublicUrl(link.url);
+        const page = await fetchHtml(link.url, timeoutSeconds);
+        fetched.push(page.url);
+        if (page.ok) {
+          leads.push(buildLeadFromPage({
+            sourceName: link.text || payload.source_name,
+            url: page.url,
+            html: page.body,
+            config,
+            criteria,
+          }));
+        } else {
+          errors.push(`HTTP ${page.status}: ${link.url}`);
+        }
+      } catch (error) {
+        errors.push(fetchErrorMessage(error, link.url));
       }
-    } catch (error) {
-      errors.push(fetchErrorMessage(error, link.url));
     }
   }
 
