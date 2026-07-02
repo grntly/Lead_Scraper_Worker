@@ -379,6 +379,19 @@ async function fetchHtml(url, timeoutSeconds) {
   }
 }
 
+function fetchErrorMessage(error, url) {
+  const code = error && (error.code || (error.cause && error.cause.code));
+  if (code === 'CERT_HAS_EXPIRED') {
+    return `SSL-certificaat is verlopen voor ${url}. Deze bron kan pas veilig worden gescraped nadat het certificaat is vernieuwd.`;
+  }
+
+  if (code) {
+    return `${code}: ${url}`;
+  }
+
+  return `${error && error.message ? error.message : String(error)}: ${url}`;
+}
+
 function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
   const text = stripTags(html);
   const emails = extractEmails(text);
@@ -431,7 +444,28 @@ export async function runLeadScrape(payload) {
   const leads = [];
   const errors = [];
 
-  const first = await fetchHtml(startUrl.toString(), timeoutSeconds);
+  let first;
+  try {
+    first = await fetchHtml(startUrl.toString(), timeoutSeconds);
+  } catch (error) {
+    const message = fetchErrorMessage(error, startUrl.toString());
+    return {
+      success: false,
+      message,
+      stats: {
+        pages_fetched: fetched.length,
+        items_found: 0,
+        errors_count: 1,
+      },
+      leads: [],
+      run_items: [{
+        detail_url: startUrl.toString(),
+        raw_title: payload.source_name || startUrl.hostname,
+        status: 'failed',
+        error_text: message,
+      }],
+    };
+  }
   fetched.push(first.url);
   if (!first.ok) {
     return {
@@ -476,7 +510,7 @@ export async function runLeadScrape(payload) {
         errors.push(`HTTP ${page.status}: ${link.url}`);
       }
     } catch (error) {
-      errors.push(error.message || String(error));
+      errors.push(fetchErrorMessage(error, link.url));
     }
   }
 
@@ -494,6 +528,10 @@ export async function runLeadScrape(payload) {
       errors_count: errors.length,
     },
     leads: uniqueLeads,
+    run_items: errors.map((error) => ({
+      status: 'failed',
+      error_text: error,
+    })),
     config_used: config,
   };
 }

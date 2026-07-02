@@ -74,6 +74,7 @@ async function main() {
     message: result.message,
     stats: result.stats,
     leads: result.leads,
+    run_items: result.run_items || [],
   });
 
   if (!result.success) {
