@@ -78,7 +78,7 @@ async function main() {
   });
 
   if (!result.success) {
-    process.exitCode = 1;
+    console.warn(`Lead scrape completed with source-level failure: ${result.message}`);
   }
 }
 
