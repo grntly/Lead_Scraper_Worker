@@ -1,17 +1,30 @@
 # Lead Scraper Worker
 
-Minimal isolated worker template for Lead Scraper.
+GitHub Actions worker voor de Grantly `lead_scraper` module.
 
-It accepts jobs from Grantly, fetches public pages with bounded limits, extracts simple lead candidates without AI, and posts results back to the module callback endpoint.
+Deze eerste versie is bewust klein:
 
-## Environment
+- bestaande `src/server.mjs` worker kan blijven bestaan
+- workflow wordt gestart via `workflow_dispatch`
+- worker haalt een publieke lijst-URL op
+- worker blokkeert localhost/private IP targets
+- worker extraheert eenvoudige lead-signalen uit HTML
+- worker post status en kandidaat-leads terug naar Grantly
+- er is geen AI-integratie
 
-- `PORT`: HTTP port, default `8080`
-- `WORKER_TOKEN`: optional bearer token required for incoming Grantly dispatch requests
+## Benodigde Grantly-config
 
-## Endpoint
+Zet in `modules/lead_scraper/config/lead_scraper.php`:
 
-`POST /jobs/leads`
+```php
+$config['lead_scraper_github_repo_owner']    = 'grntly';
+$config['lead_scraper_github_repo_name']     = 'Lead_Scraper_Worker';
+$config['lead_scraper_github_workflow_file'] = 'lead-scraper.yml';
+$config['lead_scraper_github_workflow_ref']  = 'main';
+$config['lead_scraper_github_pat']           = 'VUL_HIER_JE_GITHUB_PAT_IN';
+```
 
-The payload is the object sent by `LeadRemoteWorkerClient`.
+De PAT heeft voor deze worker repo minimaal nodig:
 
+- Actions: Read and write
+- Contents: Read-only
