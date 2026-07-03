@@ -2,13 +2,16 @@
 
 GitHub Actions worker voor de Grantly `lead_scraper` module.
 
-Deze eerste versie is bewust klein:
+Deze worker start vanuit een publieke bron-URL en gebruikt daarna een beperkte waterfall om meer bedrijfsinformatie te vinden:
 
 - bestaande `src/server.mjs` worker kan blijven bestaan
 - workflow wordt gestart via `workflow_dispatch`
 - worker haalt een publieke lijst-URL op
 - worker blokkeert localhost/private IP targets
-- worker extraheert eenvoudige lead-signalen uit HTML
+- worker detecteert kandidaat-bedrijven uit tabellen, bronpagina's en detailpagina's
+- worker zoekt daarna waar mogelijk de echte bedrijfswebsite
+- worker volgt relevante contact-, over-ons-, team- en directiepagina's
+- worker extraheert e-mail, telefoon, branche, medewerkerindicaties, management/contactpersonen en e-mailpatroon hints
 - worker post status en kandidaat-leads terug naar Grantly
 - er is geen AI-integratie
 

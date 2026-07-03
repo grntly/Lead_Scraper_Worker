@@ -353,6 +353,184 @@ function classifyEnrichmentLinks(links) {
   return mapped.filter((link, index, all) => all.findIndex((candidate) => candidate.url === link.url) === index).slice(0, 20);
 }
 
+function isSkippableResearchUrl(url) {
+  return /\.(pdf|zip|rar|7z|jpg|jpeg|png|gif|webp|svg|mp4|mp3|avi|mov)(\?|#|$)/i.test(String(url || ''));
+}
+
+function isSocialOrDirectoryHost(host) {
+  return /(^|\.)((linkedin|facebook|instagram|twitter|x|youtube|tiktok)\.com|google\.[a-z.]+|bing\.com|kvk\.nl)$/i.test(host);
+}
+
+function hostWithoutWww(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function discoverCompanyWebsite(links, sourceHost) {
+  const candidates = [];
+
+  for (const link of links) {
+    if (!/^https?:\/\//i.test(link.url) || isSkippableResearchUrl(link.url)) {
+      continue;
+    }
+
+    const host = hostWithoutWww(link.url);
+    if (!host || host === sourceHost || isSocialOrDirectoryHost(host)) {
+      continue;
+    }
+
+    const haystack = `${link.text} ${link.url}`.toLowerCase();
+    let score = 10;
+    if (/website|site|homepage|bezoek|visit|www\./i.test(haystack)) score += 30;
+    if (/contact|over-ons|about|team|directie|management/i.test(haystack)) score += 10;
+
+    candidates.push({ url: link.url, score });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates.length ? candidates[0].url : '';
+}
+
+function researchLinkScore(link) {
+  const haystack = `${link.text} ${link.url}`.toLowerCase();
+  let score = 0;
+
+  if (/contact|contacteer|kontakt/.test(haystack)) score += 40;
+  if (/over-ons|over_ons|about|wie-zijn-wij|wie_zijn_wij|organisatie|company/.test(haystack)) score += 35;
+  if (/team|mensen|people|medewerkers|directie|management|bestuur|leadership|founder|ceo|cfo|cto/.test(haystack)) score += 45;
+  if (/vacature|werken-bij|career|jobs/.test(haystack)) score += 8;
+  if (/privacy|voorwaarden|terms|cookie|login|account|cart|winkelwagen/.test(haystack)) score -= 50;
+
+  return score;
+}
+
+function candidateResearchLinks(links, websiteUrl, limit = 5) {
+  const websiteHost = hostWithoutWww(websiteUrl);
+  const candidates = [];
+
+  for (const link of links) {
+    if (!/^https?:\/\//i.test(link.url) || isSkippableResearchUrl(link.url)) {
+      continue;
+    }
+
+    if (hostWithoutWww(link.url) !== websiteHost) {
+      continue;
+    }
+
+    const score = researchLinkScore(link);
+    if (score <= 0) {
+      continue;
+    }
+
+    candidates.push({ url: link.url, text: link.text, score });
+  }
+
+  return candidates
+    .filter((link, index, all) => all.findIndex((candidate) => candidate.url === link.url) === index)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
+function emailGuessesForName(name, domain, pattern = '') {
+  const parts = String(name || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z\s-]/g, ' ')
+    .split(/[\s-]+/)
+    .filter(Boolean);
+
+  if (parts.length < 2 || !domain) {
+    return [];
+  }
+
+  const first = parts[0];
+  const last = parts[parts.length - 1];
+  const localPattern = String(pattern || '').split('@')[0].toLowerCase();
+  const guesses = [];
+
+  if (localPattern.includes('voornaam') || localPattern.includes('firstname') || localPattern.includes('first')) {
+    guesses.push(`${first}.${last}@${domain}`);
+  }
+
+  guesses.push(`${first}.${last}@${domain}`);
+  guesses.push(`${first}@${domain}`);
+  guesses.push(`${first[0]}${last}@${domain}`);
+
+  return [...new Set(guesses)];
+}
+
+function extractManagementContacts(text, domain, emailPattern = '') {
+  const roles = [
+    'ceo', 'cfo', 'cto', 'coo', 'chief executive officer', 'chief financial officer', 'chief technology officer',
+    'directeur', 'algemeen directeur', 'commercieel directeur', 'financieel directeur', 'technisch directeur',
+    'founder', 'co-founder', 'oprichter', 'mede-oprichter', 'eigenaar', 'owner', 'partner',
+    'managing director', 'directie', 'bestuurder'
+  ];
+  const rolePattern = roles.map((role) => role.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const lines = String(text || '')
+    .split(/[.\n\r;|]+/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter((line) => line.length >= 8 && line.length <= 220);
+  const contacts = [];
+
+  for (const line of lines) {
+    if (!new RegExp(rolePattern, 'i').test(line)) {
+      continue;
+    }
+
+    const role = (line.match(new RegExp(rolePattern, 'i')) || [''])[0];
+    const names = line.match(/\b[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'’-]+(?:\s+(?:van|de|den|der|het|ter|ten|op|aan|du|la|le|von|of))?(?:\s+[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'’-]+){1,3}\b/g) || [];
+
+    for (const name of names) {
+      if (new RegExp(rolePattern, 'i').test(name)) {
+        continue;
+      }
+
+      const emailGuesses = emailGuessesForName(name, domain, emailPattern);
+      contacts.push({
+        name,
+        role,
+        source_text: line,
+        email_guess: emailGuesses[0] || '',
+      });
+    }
+  }
+
+  return contacts
+    .filter((contact, index, all) => all.findIndex((candidate) => candidate.name.toLowerCase() === contact.name.toLowerCase() && candidate.role.toLowerCase() === contact.role.toLowerCase()) === index)
+    .slice(0, 8);
+}
+
+async function fetchResearchPage(url, timeoutSeconds, fetched, errors, pageCache = null) {
+  try {
+    await assertPublicUrl(url);
+    if (pageCache && pageCache.has(url)) {
+      return pageCache.get(url);
+    }
+
+    const page = await fetchHtml(url, timeoutSeconds);
+    if (!fetched.includes(page.url)) {
+      fetched.push(page.url);
+    }
+    if (pageCache) {
+      pageCache.set(url, page);
+      pageCache.set(page.url, page);
+    }
+    if (!page.ok) {
+      errors.push(`HTTP ${page.status}: ${url}`);
+      return null;
+    }
+    return page;
+  } catch (error) {
+    errors.push(fetchErrorMessage(error, url));
+    return null;
+  }
+}
+
 function scoreLead(lead, criteria) {
   let score = 30;
   const reasons = [];
@@ -471,6 +649,7 @@ function buildLeadFromTableRow({ row, sourceName, pageUrl, criteria }) {
       : [],
     source_url: row.source_url || pageUrl,
     raw_payload: row,
+    needs_website_discovery: true,
     status: 'new',
   };
 }
@@ -556,6 +735,113 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
   };
 }
 
+async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeoutSeconds, fetched, errors, onProgress, pageCache }) {
+  const sourceHost = hostWithoutWww(payload.list_url);
+  const researchPages = [];
+  const allLinks = [];
+  const allTexts = [];
+  const emailPattern = criteria.email_pattern_example || '';
+
+  async function addPage(url, linkType, title) {
+    if (!url || researchPages.some((page) => page.url === url)) {
+      return null;
+    }
+
+    const page = await fetchResearchPage(url, timeoutSeconds, fetched, errors, pageCache);
+    if (!page) {
+      return null;
+    }
+
+    const text = stripTags(page.body);
+    const links = extractLinks(page.body, page.url);
+    researchPages.push({ url: page.url, link_type: linkType, title: title || titleFromHtml(page.body) || linkType, text });
+    allTexts.push(text);
+    allLinks.push(...links);
+    return { page, text, links };
+  }
+
+  if (lead.source_url) {
+    await addPage(lead.source_url, 'source', lead.company_name);
+  }
+
+  let website = lead.website || '';
+  if (!website || lead.needs_website_discovery) {
+    website = discoverCompanyWebsite(allLinks, sourceHost) || website;
+  }
+
+  if (website) {
+    const websitePage = await addPage(website, 'website', lead.company_name);
+    if (websitePage) {
+      const extraLinks = candidateResearchLinks(websitePage.links, websitePage.page.url, 5);
+      for (const link of extraLinks) {
+        await addPage(link.url, researchLinkScore(link) >= 40 ? 'research' : 'website', link.text || 'research');
+        await onProgress(`Waterfall onderzoekt ${lead.company_name}: ${researchPages.length} pagina's bekeken.`);
+      }
+    }
+  }
+
+  if (researchPages.length === 0) {
+    return lead;
+  }
+
+  const combinedText = allTexts.join('\n').slice(0, 60000);
+  const emails = extractEmails(combinedText);
+  const phones = extractPhones(combinedText);
+  const employeeRange = extractEmployeeRange(combinedText);
+  const branches = findMatchingTerms(criteria.branches, `${lead.company_name} ${combinedText}`.toLowerCase());
+  const managementContacts = extractManagementContacts(combinedText, website ? hostWithoutWww(website) : '', emailPattern);
+  const emailGuesses = [
+    ...managementContacts.map((contact) => contact.email_guess).filter(Boolean),
+    ...(website ? [`info@${hostWithoutWww(website)}`, `sales@${hostWithoutWww(website)}`] : []),
+  ].filter((email, index, all) => email && all.indexOf(email) === index).slice(0, 10);
+  const enrichmentLinks = [
+    ...(Array.isArray(lead.enrichment_links) ? lead.enrichment_links : []),
+    ...classifyEnrichmentLinks(allLinks),
+    ...researchPages.map((page) => ({
+      link_type: page.link_type,
+      url: page.url,
+      title: page.title,
+    })),
+  ].filter((link, index, all) => link.url && all.findIndex((candidate) => candidate.url === link.url) === index).slice(0, 20);
+
+  const descriptionParts = [
+    lead.description,
+    combinedText.slice(0, 700),
+  ].filter(Boolean);
+  const researchSummary = [
+    `Waterfall: ${researchPages.length} pagina's onderzocht.`,
+    website ? `Bedrijfswebsite: ${website}.` : '',
+    managementContacts.length ? `Mogelijke leiding/contactpersonen: ${managementContacts.map((contact) => `${contact.name} (${contact.role})`).join(', ')}.` : '',
+    emails.length ? `Publieke e-mails gevonden: ${emails.slice(0, 3).join(', ')}.` : '',
+  ].filter(Boolean).join(' ');
+
+  const enriched = {
+    ...lead,
+    website: website || lead.website,
+    email: lead.email || emails[0] || '',
+    phone: lead.phone || phones[0] || '',
+    industry: lead.industry || branches[0] || '',
+    description: descriptionParts.join('\n\n').slice(0, 1800),
+    employee_count_text: lead.employee_count_text || employeeRange.text,
+    employee_count_min: lead.employee_count_min ?? employeeRange.min,
+    employee_count_max: lead.employee_count_max ?? employeeRange.max,
+    enrichment_links: enrichmentLinks,
+    management_contacts: managementContacts,
+    email_guesses: emailGuesses,
+    research_summary: researchSummary,
+    research_pages_count: researchPages.length,
+  };
+
+  const scored = scoreLead(enriched, criteria);
+  const emailHint = website ? emailPatternHint(emailPattern, website) : '';
+  enriched.criteria_score = scored.score;
+  enriched.criteria_reason = [scored.reason, emailHint ? `e-mailpatroon hint: ${emailHint}` : '', managementContacts.length ? 'leiding/contactpersoon-signalen gevonden' : '']
+    .filter(Boolean)
+    .join('; ');
+
+  return enriched;
+}
+
 export async function runLeadScrape(payload, onProgress = async () => {}) {
   const config = parseJson(payload.config_json);
   const criteria = parseJson(payload.criteria_json);
@@ -565,6 +851,7 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
   const fetched = [];
   const leads = [];
   const errors = [];
+  const pageCache = new Map();
 
   async function progress(message) {
     await onProgress({
@@ -600,6 +887,8 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
     };
   }
   fetched.push(first.url);
+  pageCache.set(startUrl.toString(), first);
+  pageCache.set(first.url, first);
   await progress('Lijstpagina opgehaald. Links en bedrijven worden nu geanalyseerd.');
 
   if (!first.ok) {
@@ -646,7 +935,11 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
       try {
         await assertPublicUrl(link.url);
         const page = await fetchHtml(link.url, timeoutSeconds);
-        fetched.push(page.url);
+        if (!fetched.includes(page.url)) {
+          fetched.push(page.url);
+        }
+        pageCache.set(link.url, page);
+        pageCache.set(page.url, page);
         if (page.ok) {
           leads.push(buildLeadFromPage({
             sourceName: link.text || payload.source_name,
@@ -664,6 +957,27 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
 
       await progress(`${fetched.length} pagina's opgehaald, ${leads.length} kandidaat-leads gevonden.`);
     }
+  }
+
+  const researchLimit = clampNumber(
+    config.max_research_leads || criteria.max_research_leads,
+    Math.min(leads.length, 25),
+    1,
+    75
+  );
+  for (let index = 0; index < Math.min(leads.length, researchLimit); index++) {
+    leads[index] = await enrichLeadWithWaterfall({
+      lead: leads[index],
+      payload,
+      config,
+      criteria,
+      timeoutSeconds,
+      fetched,
+      errors,
+      onProgress: progress,
+      pageCache,
+    });
+    await progress(`Waterfall verrijking: ${index + 1}/${Math.min(leads.length, researchLimit)} bedrijven onderzocht.`);
   }
 
   const uniqueLeads = leads.filter((lead, index, all) => {
