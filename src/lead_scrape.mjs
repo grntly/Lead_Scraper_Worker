@@ -394,6 +394,49 @@ function discoverCompanyWebsite(links, sourceHost) {
   return candidates.length ? candidates[0].url : '';
 }
 
+function companyDomainCandidates(companyName) {
+  const normalized = String(companyName || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/&/g, ' en ')
+    .replace(/\b(bv|b\.v|nv|n\.v|holding|groep|group|agency|solutions|technologies|technology|software|consulting|consultants|services)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  const parts = normalized.split(/\s+/).filter(Boolean);
+  if (!parts.length) {
+    return [];
+  }
+
+  const compact = parts.join('');
+  const dashed = parts.join('-');
+  const names = [...new Set([compact, dashed, parts[0]])].filter((name) => name.length >= 3);
+  const tlds = ['nl', 'com', 'eu', 'io'];
+  const urls = [];
+
+  for (const name of names) {
+    for (const tld of tlds) {
+      urls.push(`https://${name}.${tld}/`);
+    }
+  }
+
+  return urls.slice(0, 12);
+}
+
+function pageMatchesCompany(page, companyName) {
+  const tokens = String(companyName || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token.length >= 4);
+  if (!tokens.length) {
+    return false;
+  }
+
+  const haystack = `${page.url} ${titleFromHtml(page.body)} ${metaDescriptionFromHtml(page.body)} ${stripTags(page.body).slice(0, 2000)}`.toLowerCase();
+  return tokens.some((token) => haystack.includes(token));
+}
+
 function researchLinkScore(link) {
   const haystack = `${link.text} ${link.url}`.toLowerCase();
   let score = 0;
@@ -505,7 +548,7 @@ function extractManagementContacts(text, domain, emailPattern = '') {
     .slice(0, 8);
 }
 
-async function fetchResearchPage(url, timeoutSeconds, fetched, errors, pageCache = null) {
+async function fetchResearchPage(url, timeoutSeconds, fetched, errors, pageCache = null, options = {}) {
   try {
     await assertPublicUrl(url);
     if (pageCache && pageCache.has(url)) {
@@ -521,14 +564,29 @@ async function fetchResearchPage(url, timeoutSeconds, fetched, errors, pageCache
       pageCache.set(page.url, page);
     }
     if (!page.ok) {
-      errors.push(`HTTP ${page.status}: ${url}`);
+      if (options.silent !== true) {
+        errors.push(`HTTP ${page.status}: ${url}`);
+      }
       return null;
     }
     return page;
   } catch (error) {
-    errors.push(fetchErrorMessage(error, url));
+    if (options.silent !== true) {
+      errors.push(fetchErrorMessage(error, url));
+    }
     return null;
   }
+}
+
+async function discoverWebsiteByCompanyName(companyName, timeoutSeconds, fetched, errors, pageCache) {
+  for (const url of companyDomainCandidates(companyName)) {
+    const page = await fetchResearchPage(url, timeoutSeconds, fetched, errors, pageCache, { silent: true });
+    if (page && pageMatchesCompany(page, companyName)) {
+      return page.url;
+    }
+  }
+
+  return '';
 }
 
 function scoreLead(lead, criteria) {
@@ -639,7 +697,7 @@ function buildLeadFromTableRow({ row, sourceName, pageUrl, criteria }) {
 
   return {
     company_name: row.company_name,
-    website: row.source_url || pageUrl,
+    website: '',
     industry: matchedBranches[0] || 'ICT / software',
     description: descriptionParts.join('; '),
     criteria_score: criteriaScore,
@@ -767,6 +825,9 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   let website = lead.website || '';
   if (!website || lead.needs_website_discovery) {
     website = discoverCompanyWebsite(allLinks, sourceHost) || website;
+    if (!website) {
+      website = await discoverWebsiteByCompanyName(lead.company_name, timeoutSeconds, fetched, errors, pageCache);
+    }
   }
 
   if (website) {
