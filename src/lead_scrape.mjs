@@ -556,7 +556,7 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
   };
 }
 
-export async function runLeadScrape(payload) {
+export async function runLeadScrape(payload, onProgress = async () => {}) {
   const config = parseJson(payload.config_json);
   const criteria = parseJson(payload.criteria_json);
   const maxPages = clampNumber(payload.max_pages, 5, 1, 20);
@@ -565,6 +565,17 @@ export async function runLeadScrape(payload) {
   const fetched = [];
   const leads = [];
   const errors = [];
+
+  async function progress(message) {
+    await onProgress({
+      message,
+      stats: {
+        pages_fetched: fetched.length,
+        items_found: leads.length,
+        errors_count: errors.length,
+      },
+    });
+  }
 
   let first;
   try {
@@ -589,6 +600,8 @@ export async function runLeadScrape(payload) {
     };
   }
   fetched.push(first.url);
+  await progress('Lijstpagina opgehaald. Links en bedrijven worden nu geanalyseerd.');
+
   if (!first.ok) {
     return {
       success: false,
@@ -615,6 +628,7 @@ export async function runLeadScrape(payload) {
         criteria,
       }));
     }
+    await progress(`${leads.length} kandidaat-leads uit tabel gevonden.`);
   } else {
     const links = filterLinks(extractLinks(first.body, baseUrl), config, baseHost)
       .slice(0, Math.max(0, maxPages - 1));
@@ -626,6 +640,7 @@ export async function runLeadScrape(payload) {
       config,
       criteria,
     }));
+    await progress('Hoofdpagina verwerkt. Detailpagina\'s worden nu opgehaald.');
 
     for (const link of links) {
       try {
@@ -646,6 +661,8 @@ export async function runLeadScrape(payload) {
       } catch (error) {
         errors.push(fetchErrorMessage(error, link.url));
       }
+
+      await progress(`${fetched.length} pagina's opgehaald, ${leads.length} kandidaat-leads gevonden.`);
     }
   }
 

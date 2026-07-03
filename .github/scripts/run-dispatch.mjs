@@ -56,16 +56,36 @@ async function main() {
   });
 
   const result = await runLeadScrape({
-    run_id: runId,
-    source_id: sourceId,
-    source_name: optional('SOURCE_NAME'),
-    list_url: process.env.LIST_URL,
-    base_url: optional('BASE_URL'),
-    config_json: optional('CONFIG_JSON', '{}'),
-    criteria_json: optional('CRITERIA_JSON', '{}'),
-    max_pages: optional('MAX_PAGES', '5'),
-    timeout_seconds: optional('TIMEOUT_SECONDS', '30'),
-  });
+      run_id: runId,
+      source_id: sourceId,
+      source_name: optional('SOURCE_NAME'),
+      list_url: process.env.LIST_URL,
+      base_url: optional('BASE_URL'),
+      config_json: optional('CONFIG_JSON', '{}'),
+      criteria_json: optional('CRITERIA_JSON', '{}'),
+      max_pages: optional('MAX_PAGES', '5'),
+      timeout_seconds: optional('TIMEOUT_SECONDS', '30'),
+    },
+    async (progress) => {
+      try {
+        const callbackResult = await postCallback(callbackUrl, callbackToken, {
+          run_id: runId,
+          source_id: sourceId,
+          status: 'running',
+          message: progress.message,
+          stats: progress.stats,
+        });
+
+        if (callbackResult.status === 409) {
+          throw new Error('Run cancelled from Grantly.');
+        }
+      } catch (error) {
+        if (error && error.message === 'Run cancelled from Grantly.') {
+          throw error;
+        }
+        console.warn('Progress callback failed:', error);
+      }
+    });
 
   await postCallback(callbackUrl, callbackToken, {
     run_id: runId,
@@ -84,6 +104,10 @@ async function main() {
 
 main().catch(async (error) => {
   console.error('Lead Scraper worker failed:', error);
+
+  if (error && error.message === 'Run cancelled from Grantly.') {
+    process.exit(0);
+  }
 
   if (process.env.CALLBACK_URL && process.env.CALLBACK_TOKEN) {
     await postCallback(process.env.CALLBACK_URL, process.env.CALLBACK_TOKEN, {
