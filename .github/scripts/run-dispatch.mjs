@@ -59,6 +59,7 @@ async function main() {
       run_id: runId,
       source_id: sourceId,
       source_name: optional('SOURCE_NAME'),
+      source_type: optional('SOURCE_TYPE'),
       list_url: process.env.LIST_URL,
       base_url: optional('BASE_URL'),
       config_json: optional('CONFIG_JSON', '{}'),

@@ -8,8 +8,10 @@ Deze worker start vanuit een publieke bron-URL en gebruikt daarna een beperkte w
 - workflow wordt gestart via `workflow_dispatch`
 - worker haalt een publieke lijst-URL op
 - worker blokkeert localhost/private IP targets
+- worker krijgt het Grantly brontype mee en behandelt rankings/directories anders dan een losse bedrijfswebsite
 - worker detecteert kandidaat-bedrijven uit tabellen, bronpagina's en detailpagina's
-- worker zoekt daarna waar mogelijk de echte bedrijfswebsite
+- worker detecteert ook simpele rankinglijsten waar alleen bedrijfsnamen in staan
+- worker zoekt daarna waar mogelijk de echte bedrijfswebsite via bronlinks, domeinkandidaten en beperkte zoekresultaten
 - worker volgt relevante contact-, over-ons-, team- en directiepagina's
 - worker extraheert e-mail, telefoon, branche, medewerkerindicaties, management/contactpersonen en e-mailpatroon hints
 - worker post status en kandidaat-leads terug naar Grantly

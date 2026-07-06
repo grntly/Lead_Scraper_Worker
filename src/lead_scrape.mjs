@@ -184,6 +184,19 @@ function extractLinks(html, baseUrl) {
   return links;
 }
 
+function normalizeSourceType(value) {
+  const type = String(value || '').toLowerCase().replace(/[^a-z0-9_/-]+/g, '_');
+  if (['ranking', 'directory', 'industry_page', 'list', 'listing'].includes(type)) {
+    return type;
+  }
+
+  return type || 'website';
+}
+
+function sourceTypeIsListing(sourceType) {
+  return ['ranking', 'directory', 'industry_page', 'list', 'listing'].includes(normalizeSourceType(sourceType));
+}
+
 function extractCells(rowHtml) {
   const cells = [];
   const regex = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi;
@@ -250,6 +263,107 @@ function extractTableRows(html, baseUrl) {
     const key = row.company_name.toLowerCase();
     return key !== '' && all.findIndex((candidate) => candidate.company_name.toLowerCase() === key) === index;
   });
+}
+
+function cleanCompanyCandidateText(text) {
+  return stripTags(text)
+    .replace(/^\s*(?:#?\d{1,4}|[A-Z])\s*[\).:-]\s*/i, '')
+    .replace(/\b(?:bekijk|lees meer|read more|website|contact|profiel|details|meer info)\b.*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 191);
+}
+
+function looksLikeCompanyName(text) {
+  const value = String(text || '').trim();
+  if (value.length < 2 || value.length > 90) {
+    return false;
+  }
+
+  if (/@|https?:|www\.|\d{2}[-/]\d{2}[-/]\d{2,4}|\b(home|menu|login|privacy|cookies|contact|nieuws|blog|vacatures|over ons|about|read more|lees meer|download|pdf)\b/i.test(value)) {
+    return false;
+  }
+
+  if (/^\d+$|^\d+([.,]\d+)?%$/.test(value)) {
+    return false;
+  }
+
+  const words = value.split(/\s+/).filter(Boolean);
+  return words.length <= 7 && /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(value);
+}
+
+function pushListCandidate(candidates, candidate, baseUrl) {
+  const companyName = cleanCompanyCandidateText(candidate.company_name || candidate.text || '');
+  if (!looksLikeCompanyName(companyName)) {
+    return;
+  }
+
+  let sourceUrl = candidate.source_url || baseUrl;
+  if (sourceUrl) {
+    try {
+      sourceUrl = new URL(sourceUrl, baseUrl).toString();
+    } catch {
+      sourceUrl = baseUrl;
+    }
+  }
+
+  candidates.push({
+    company_name: companyName,
+    source_url: sourceUrl || baseUrl,
+    rank: candidate.rank || null,
+    raw_text: candidate.raw_text || companyName,
+  });
+}
+
+function extractListCompanyCandidates(html, baseUrl) {
+  const candidates = [];
+  const blocks = [
+    /<li\b[^>]*>([\s\S]*?)<\/li>/gi,
+    /<h[2-4]\b[^>]*>([\s\S]*?)<\/h[2-4]>/gi,
+    /<article\b[^>]*>([\s\S]*?)<\/article>/gi,
+  ];
+
+  for (const regex of blocks) {
+    let match;
+    while ((match = regex.exec(String(html || ''))) !== null) {
+      const blockHtml = match[1];
+      const linkMatch = blockHtml.match(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i);
+      const text = linkMatch ? stripTags(linkMatch[2]) : stripTags(blockHtml);
+      const rankMatch = stripTags(blockHtml).match(/^\s*(\d{1,4})[\).:-]?\s+/);
+      pushListCandidate(candidates, {
+        company_name: text,
+        source_url: linkMatch ? linkMatch[1] : baseUrl,
+        rank: rankMatch ? Number(rankMatch[1]) : null,
+        raw_text: stripTags(blockHtml),
+      }, baseUrl);
+    }
+  }
+
+  for (const link of extractLinks(html, baseUrl)) {
+    pushListCandidate(candidates, {
+      company_name: link.text,
+      source_url: link.url,
+      raw_text: link.text,
+    }, baseUrl);
+  }
+
+  return candidates.filter((row, index, all) => {
+    const key = row.company_name.toLowerCase();
+    return key !== '' && all.findIndex((candidate) => candidate.company_name.toLowerCase() === key) === index;
+  });
+}
+
+function pageLooksLikeListing(html, sourceType) {
+  if (sourceTypeIsListing(sourceType)) {
+    return true;
+  }
+
+  const text = `${titleFromHtml(html)} ${firstTagText(html, 'h1')} ${stripTags(html).slice(0, 4000)}`.toLowerCase();
+  if (/\b(top\s*\d+|ranking|ranglijst|bedrijvenlijst|gids|directory|ledenlijst|deelnemers|winnaars|gazellen|award|awards)\b/.test(text)) {
+    return true;
+  }
+
+  return extractListCompanyCandidates(html, 'https://example.com/').length >= 12;
 }
 
 function patternMatches(pattern, value) {
@@ -589,6 +703,63 @@ async function discoverWebsiteByCompanyName(companyName, timeoutSeconds, fetched
   return '';
 }
 
+function duckDuckGoResultUrls(html) {
+  const urls = [];
+  const hrefRegex = /<a\b[^>]*href=["']([^"']+)["'][^>]*>/gi;
+  let match;
+
+  while ((match = hrefRegex.exec(String(html || ''))) !== null) {
+    let href = decodeEntities(match[1]);
+    try {
+      const parsed = new URL(href, 'https://duckduckgo.com/');
+      const redirected = parsed.searchParams.get('uddg');
+      if (redirected) {
+        href = redirected;
+      } else {
+        href = parsed.toString();
+      }
+    } catch {
+      continue;
+    }
+
+    if (!/^https?:\/\//i.test(href) || isSkippableResearchUrl(href)) {
+      continue;
+    }
+
+    const host = hostWithoutWww(href);
+    if (!host || isSocialOrDirectoryHost(host) || /duckduckgo\.com$/i.test(host)) {
+      continue;
+    }
+
+    urls.push(href);
+  }
+
+  return urls.filter((url, index, all) => all.findIndex((candidate) => candidate === url) === index).slice(0, 8);
+}
+
+async function discoverWebsiteBySearch(companyName, timeoutSeconds, fetched, errors, pageCache, options = {}) {
+  if (options.enabled === false) {
+    return '';
+  }
+
+  const query = encodeURIComponent(`"${companyName}" bedrijf website`);
+  const searchUrl = `https://duckduckgo.com/html/?q=${query}`;
+  const searchPage = await fetchResearchPage(searchUrl, timeoutSeconds, fetched, errors, pageCache, { silent: true });
+  if (!searchPage) {
+    return '';
+  }
+
+  const resultUrls = duckDuckGoResultUrls(searchPage.body);
+  for (const url of resultUrls.slice(0, 5)) {
+    const page = await fetchResearchPage(url, timeoutSeconds, fetched, errors, pageCache, { silent: true });
+    if (page && pageMatchesCompany(page, companyName)) {
+      return page.url;
+    }
+  }
+
+  return '';
+}
+
 function scoreLead(lead, criteria) {
   let score = 30;
   const reasons = [];
@@ -702,6 +873,51 @@ function buildLeadFromTableRow({ row, sourceName, pageUrl, criteria }) {
     description: descriptionParts.join('; '),
     criteria_score: criteriaScore,
     criteria_reason: reasons.join('; ') || 'gevonden in rankingtabel',
+    enrichment_links: row.source_url && row.source_url !== pageUrl
+      ? [{ link_type: 'source', url: row.source_url, title: row.company_name }]
+      : [],
+    source_url: row.source_url || pageUrl,
+    raw_payload: row,
+    needs_website_discovery: true,
+    status: 'new',
+  };
+}
+
+function buildLeadFromListingCandidate({ row, sourceName, pageUrl, criteria }) {
+  const descriptionParts = [];
+  if (row.rank) {
+    descriptionParts.push(`Lijstpositie ${row.rank}`);
+  }
+  descriptionParts.push(`Gevonden in ${sourceName || 'publieke bedrijvenlijst'}.`);
+
+  const haystack = `${row.company_name} ${row.raw_text || ''} ${descriptionParts.join(' ')}`.toLowerCase();
+  const matchedBranches = findMatchingTerms(criteria.branches, haystack);
+  const matchedKeywords = findMatchingTerms(criteria.keywords, haystack);
+  const excluded = findMatchingTerms(criteria.exclude_keywords, haystack);
+  let criteriaScore = 55;
+  const reasons = [];
+
+  if (row.rank) reasons.push(`lijstpositie ${row.rank}`);
+  if (matchedBranches.length) {
+    criteriaScore += Math.min(15, matchedBranches.length * 5);
+    reasons.push(`branche-match: ${matchedBranches.join(', ')}`);
+  }
+  if (matchedKeywords.length) {
+    criteriaScore += Math.min(15, matchedKeywords.length * 5);
+    reasons.push(`keywords: ${matchedKeywords.join(', ')}`);
+  }
+  if (excluded.length) {
+    criteriaScore -= 30;
+    reasons.push(`uitsluiting: ${excluded.join(', ')}`);
+  }
+
+  return {
+    company_name: row.company_name,
+    website: '',
+    industry: matchedBranches[0] || '',
+    description: descriptionParts.join('; '),
+    criteria_score: Math.max(0, Math.min(100, criteriaScore)),
+    criteria_reason: reasons.join('; ') || 'gevonden in bedrijvenlijst',
     enrichment_links: row.source_url && row.source_url !== pageUrl
       ? [{ link_type: 'source', url: row.source_url, title: row.company_name }]
       : [],
@@ -828,6 +1044,11 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     if (!website) {
       website = await discoverWebsiteByCompanyName(lead.company_name, timeoutSeconds, fetched, errors, pageCache);
     }
+    if (!website) {
+      website = await discoverWebsiteBySearch(lead.company_name, timeoutSeconds, fetched, errors, pageCache, {
+        enabled: config.enable_search_discovery !== false,
+      });
+    }
   }
 
   if (website) {
@@ -906,6 +1127,7 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
 export async function runLeadScrape(payload, onProgress = async () => {}) {
   const config = parseJson(payload.config_json);
   const criteria = parseJson(payload.criteria_json);
+  const sourceType = normalizeSourceType(payload.source_type || config.source_type || 'website');
   const maxPages = clampNumber(payload.max_pages, 5, 1, 20);
   const timeoutSeconds = clampNumber(payload.timeout_seconds, 30, 5, 120);
   const startUrl = await assertPublicUrl(payload.list_url);
@@ -968,17 +1190,21 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
   const baseUrl = payload.base_url || startUrl.toString();
   const baseHost = new URL(baseUrl).hostname.replace(/^www\./, '');
   const tableRows = extractTableRows(first.body, first.url);
+  const listingLike = pageLooksLikeListing(first.body, sourceType);
+  const listRows = listingLike ? extractListCompanyCandidates(first.body, first.url) : [];
+  const sourceRows = tableRows.length > 0 ? tableRows : listRows;
 
-  if (tableRows.length > 0) {
-    for (const row of tableRows.slice(0, 150)) {
-      leads.push(buildLeadFromTableRow({
+  if (sourceRows.length > 0) {
+    for (const row of sourceRows.slice(0, 150)) {
+      const builder = tableRows.length > 0 ? buildLeadFromTableRow : buildLeadFromListingCandidate;
+      leads.push(builder({
         row,
         sourceName: payload.source_name,
         pageUrl: first.url,
         criteria,
       }));
     }
-    await progress(`${leads.length} kandidaat-leads uit tabel gevonden.`);
+    await progress(`${leads.length} kandidaat-leads uit ${tableRows.length > 0 ? 'tabel' : 'lijst'} gevonden.`);
   } else {
     const links = filterLinks(extractLinks(first.body, baseUrl), config, baseHost)
       .slice(0, Math.max(0, maxPages - 1));
@@ -1059,6 +1285,10 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
       status: 'failed',
       error_text: error,
     })),
-    config_used: config,
+    config_used: {
+      ...config,
+      source_type: sourceType,
+      detected_as_listing: listingLike,
+    },
   };
 }

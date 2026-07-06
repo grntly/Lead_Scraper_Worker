@@ -12,6 +12,9 @@ on:
       source_name:
         description: "Source name"
         required: false
+      source_type:
+        description: "Source type: website, ranking, directory, industry_page or custom"
+        required: false
       list_url:
         description: "Public list URL to fetch"
         required: true
@@ -59,6 +62,7 @@ jobs:
           RUN_ID: ${{ github.event.inputs.run_id }}
           SOURCE_ID: ${{ github.event.inputs.source_id }}
           SOURCE_NAME: ${{ github.event.inputs.source_name }}
+          SOURCE_TYPE: ${{ github.event.inputs.source_type }}
           LIST_URL: ${{ github.event.inputs.list_url }}
           BASE_URL: ${{ github.event.inputs.base_url }}
           CONFIG_JSON: ${{ github.event.inputs.config_json }}
