@@ -42,6 +42,7 @@ async function main() {
   const sourceId = Number(process.env.SOURCE_ID);
   const callbackUrl = process.env.CALLBACK_URL;
   const callbackToken = process.env.CALLBACK_TOKEN;
+  let lastProgressCallbackAt = 0;
 
   await postCallback(callbackUrl, callbackToken, {
     run_id: runId,
@@ -69,6 +70,14 @@ async function main() {
     },
     async (progress) => {
       try {
+        const now = Date.now();
+        const shouldPostProgress = lastProgressCallbackAt === 0 || now - lastProgressCallbackAt >= 8000;
+        if (!shouldPostProgress) {
+          return;
+        }
+
+        lastProgressCallbackAt = now;
+
         const callbackResult = await postCallback(callbackUrl, callbackToken, {
           run_id: runId,
           source_id: sourceId,

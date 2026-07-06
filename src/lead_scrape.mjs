@@ -483,6 +483,18 @@ function hostWithoutWww(url) {
   }
 }
 
+function urlsPointToSamePage(first, second) {
+  try {
+    const firstUrl = new URL(first);
+    const secondUrl = new URL(second);
+    firstUrl.hash = '';
+    secondUrl.hash = '';
+    return firstUrl.toString().replace(/\/$/, '') === secondUrl.toString().replace(/\/$/, '');
+  } catch {
+    return false;
+  }
+}
+
 function discoverCompanyWebsite(links, sourceHost) {
   const candidates = [];
 
@@ -1011,6 +1023,7 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
 
 async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeoutSeconds, fetched, errors, onProgress, pageCache }) {
   const sourceHost = hostWithoutWww(payload.list_url);
+  const listUrl = payload.list_url || '';
   const researchPages = [];
   const allLinks = [];
   const allTexts = [];
@@ -1034,7 +1047,8 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     return { page, text, links };
   }
 
-  if (lead.source_url) {
+  const sourceUrlIsListPage = lead.source_url && listUrl && urlsPointToSamePage(lead.source_url, listUrl);
+  if (lead.source_url && !sourceUrlIsListPage) {
     await addPage(lead.source_url, 'source', lead.company_name);
   }
 
