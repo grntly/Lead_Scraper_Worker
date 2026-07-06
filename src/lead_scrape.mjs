@@ -604,6 +604,56 @@ function candidateResearchLinks(links, websiteUrl, limit = 5) {
     .slice(0, limit);
 }
 
+function normalizedCrawlUrl(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    if ((parsed.pathname === '/' || parsed.pathname === '') && parsed.search === '') {
+      return parsed.origin + '/';
+    }
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function websiteCrawlCandidates(links, websiteUrl, seenUrls = new Set(), limit = 80) {
+  const websiteHost = hostWithoutWww(websiteUrl);
+  const candidates = [];
+
+  for (const link of links) {
+    if (!/^https?:\/\//i.test(link.url) || isSkippableResearchUrl(link.url)) {
+      continue;
+    }
+
+    if (hostWithoutWww(link.url) !== websiteHost) {
+      continue;
+    }
+
+    const normalized = normalizedCrawlUrl(link.url);
+    if (!normalized || seenUrls.has(normalized)) {
+      continue;
+    }
+
+    const haystack = `${link.text} ${link.url}`.toLowerCase();
+    if (/privacy|voorwaarden|terms|cookie|login|account|cart|winkelwagen|checkout|wp-json|feed|sitemap|tag\/|category\//.test(haystack)) {
+      continue;
+    }
+
+    const score = researchLinkScore(link);
+    candidates.push({
+      url: normalized,
+      text: link.text,
+      score: score > 0 ? score : 1,
+    });
+  }
+
+  return candidates
+    .filter((link, index, all) => all.findIndex((candidate) => candidate.url === link.url) === index)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
 function emailGuessesForName(name, domain, pattern = '') {
   const parts = String(name || '')
     .normalize('NFD')
@@ -1064,6 +1114,7 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   const allLinks = [];
   const allTexts = [];
   const emailPattern = criteria.email_pattern_example || '';
+  const websiteCrawlMaxPages = clampNumber(config.website_crawl_max_pages || criteria.website_crawl_max_pages, 50, 1, 100);
 
   async function addPage(url, linkType, title) {
     if (!url || researchPages.some((page) => page.url === url)) {
@@ -1104,11 +1155,32 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   if (website) {
     const websitePage = await addPage(website, 'website', lead.company_name);
     if (websitePage) {
-      const extraLinks = candidateResearchLinks(websitePage.links, websitePage.page.url, 12);
-      for (const link of extraLinks) {
-        await addPage(link.url, researchLinkScore(link) >= 40 ? 'research' : 'website', link.text || 'research');
-        if (researchPages.length % 3 === 0) {
-          await onProgress(`Waterfall onderzoekt ${lead.company_name}: ${researchPages.length} pagina's bekeken.`);
+      const seenUrls = new Set(researchPages.map((page) => normalizedCrawlUrl(page.url)).filter(Boolean));
+      const queue = websiteCrawlCandidates(websitePage.links, websitePage.page.url, seenUrls, websiteCrawlMaxPages);
+
+      while (queue.length > 0 && researchPages.length < websiteCrawlMaxPages) {
+        const link = queue.shift();
+        const normalized = normalizedCrawlUrl(link.url);
+        if (!normalized || seenUrls.has(normalized)) {
+          continue;
+        }
+
+        seenUrls.add(normalized);
+        const crawled = await addPage(link.url, link.score >= 40 ? 'research' : 'website', link.text || 'website');
+        if (crawled) {
+          const nextLinks = websiteCrawlCandidates(crawled.links, websitePage.page.url, seenUrls, websiteCrawlMaxPages);
+          for (const nextLink of nextLinks) {
+            if (queue.length >= websiteCrawlMaxPages * 2) {
+              break;
+            }
+            queue.push(nextLink);
+          }
+
+          queue.sort((a, b) => b.score - a.score);
+        }
+
+        if (researchPages.length % 5 === 0) {
+          await onProgress(`Website crawl onderzoekt ${lead.company_name}: ${researchPages.length}/${websiteCrawlMaxPages} pagina's bekeken.`);
         }
       }
     }
@@ -1118,7 +1190,7 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     return lead;
   }
 
-  const combinedText = allTexts.join('\n').slice(0, 60000);
+  const combinedText = allTexts.join('\n').slice(0, 120000);
   const emails = extractEmails(combinedText);
   const phones = extractPhones(combinedText);
   const employeeRange = extractEmployeeRange(combinedText);
@@ -1143,7 +1215,25 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
       url: page.url,
       title: page.title,
     })),
-  ].filter((link, index, all) => link.url && all.findIndex((candidate) => candidate.url === link.url) === index).slice(0, 20);
+  ].filter((link, index, all) => link.url && all.findIndex((candidate) => candidate.url === link.url) === index).slice(0, 80);
+  const researchPageSummaries = researchPages.map((page) => {
+    const pageText = page.text || '';
+    return {
+      url: page.url,
+      title: page.title,
+      link_type: page.link_type,
+      excerpt: pageText.slice(0, 900),
+      emails: extractEmails(pageText).slice(0, 5),
+      phones: extractPhones(pageText).slice(0, 5),
+    };
+  });
+  const socialLinks = classifyEnrichmentLinks(allLinks)
+    .filter((link) => ['linkedin', 'social'].includes(link.link_type))
+    .slice(0, 20);
+  const detectedKeywords = [
+    ...findMatchingTerms(criteria.keywords, combinedText.toLowerCase()),
+    ...findMatchingTerms(criteria.branches, combinedText.toLowerCase()),
+  ].filter((term, index, all) => all.indexOf(term) === index).slice(0, 30);
 
   const descriptionParts = [
     lead.description,
@@ -1152,8 +1242,10 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   const researchSummary = [
     `Waterfall: ${researchPages.length} pagina's onderzocht.`,
     website ? `Bedrijfswebsite: ${website}.` : '',
+    detectedKeywords.length ? `Gevonden thema's/keywords: ${detectedKeywords.slice(0, 10).join(', ')}.` : '',
     managementContacts.length ? `Mogelijke leiding/contactpersonen: ${managementContacts.map((contact) => `${contact.name} (${contact.role})`).join(', ')}.` : '',
     emails.length ? `Publieke e-mails gevonden: ${emails.slice(0, 3).join(', ')}.` : '',
+    phones.length ? `Publieke telefoons gevonden: ${phones.slice(0, 3).join(', ')}.` : '',
   ].filter(Boolean).join(' ');
 
   const enriched = {
@@ -1167,10 +1259,16 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     employee_count_min: lead.employee_count_min ?? employeeRange.min,
     employee_count_max: lead.employee_count_max ?? employeeRange.max,
     enrichment_links: enrichmentLinks,
+    research_pages: researchPageSummaries,
+    all_emails: emails.slice(0, 30),
+    all_phones: phones.slice(0, 30),
+    social_links: socialLinks,
+    detected_keywords: detectedKeywords,
     management_contacts: managementContacts,
     email_guesses: emailGuesses,
     research_summary: researchSummary,
     research_pages_count: researchPages.length,
+    website_crawl_max_pages: websiteCrawlMaxPages,
   };
 
   const scored = scoreLead(enriched, criteria);
