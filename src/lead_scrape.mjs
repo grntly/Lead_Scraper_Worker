@@ -568,9 +568,10 @@ function researchLinkScore(link) {
   let score = 0;
 
   if (/contact|contacteer|kontakt/.test(haystack)) score += 40;
-  if (/over-ons|over_ons|about|wie-zijn-wij|wie_zijn_wij|organisatie|company/.test(haystack)) score += 35;
-  if (/team|mensen|people|medewerkers|directie|management|bestuur|leadership|founder|ceo|cfo|cto/.test(haystack)) score += 45;
-  if (/vacature|werken-bij|career|jobs/.test(haystack)) score += 8;
+  if (/over-ons|over_ons|about|wie-zijn-wij|wie_zijn_wij|organisatie|company|bedrijf|ons-verhaal|our-story/.test(haystack)) score += 35;
+  if (/team|mensen|people|medewerkers|directie|management|bestuur|leadership|founder|ceo|cfo|cto|eigenaar|oprichter|partners|adviesraad/.test(haystack)) score += 55;
+  if (/vacature|werken-bij|werkenbij|career|careers|jobs/.test(haystack)) score += 18;
+  if (/diensten|services|solutions|oplossingen|expertise|cases|portfolio|projecten/.test(haystack)) score += 12;
   if (/privacy|voorwaarden|terms|cookie|login|account|cart|winkelwagen/.test(haystack)) score -= 50;
 
   return score;
@@ -672,6 +673,41 @@ function extractManagementContacts(text, domain, emailPattern = '') {
   return contacts
     .filter((contact, index, all) => all.findIndex((candidate) => candidate.name.toLowerCase() === contact.name.toLowerCase() && candidate.role.toLowerCase() === contact.role.toLowerCase()) === index)
     .slice(0, 8);
+}
+
+function extractRoleSignals(text, domain, emailPattern = '') {
+  const roleWords = [
+    'ceo', 'cfo', 'cto', 'coo', 'directeur', 'algemeen directeur', 'commercieel directeur',
+    'financieel directeur', 'technisch directeur', 'managing director', 'founder', 'co-founder',
+    'oprichter', 'mede-oprichter', 'eigenaar', 'partner', 'directie', 'management', 'bestuur'
+  ];
+  const rolePattern = roleWords.map((role) => role.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const chunks = String(text || '')
+    .split(/\n|\r| {2,}|[•|]/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter((line) => line.length >= 5 && line.length <= 180 && new RegExp(rolePattern, 'i').test(line));
+  const signals = [];
+
+  for (const chunk of chunks) {
+    const role = (chunk.match(new RegExp(rolePattern, 'i')) || [''])[0];
+    const names = chunk.match(/\b[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'’-]{2,}(?:\s+(?:van|de|den|der|het|ter|ten|op|aan|du|la|le|von|of))?(?:\s+[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'’-]{2,}){0,3}\b/g) || [];
+    const likelyName = names.find((name) => !new RegExp(rolePattern, 'i').test(name)) || '';
+    const guesses = likelyName ? emailGuessesForName(likelyName, domain, emailPattern) : [];
+
+    signals.push({
+      name: likelyName,
+      role,
+      source_text: chunk,
+      email_guess: guesses[0] || '',
+    });
+  }
+
+  return signals
+    .filter((signal, index, all) => {
+      const key = `${signal.name}|${signal.role}|${signal.source_text}`.toLowerCase();
+      return signal.role && all.findIndex((candidate) => `${candidate.name}|${candidate.role}|${candidate.source_text}`.toLowerCase() === key) === index;
+    })
+    .slice(0, 10);
 }
 
 async function fetchResearchPage(url, timeoutSeconds, fetched, errors, pageCache = null, options = {}) {
@@ -1068,10 +1104,12 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   if (website) {
     const websitePage = await addPage(website, 'website', lead.company_name);
     if (websitePage) {
-      const extraLinks = candidateResearchLinks(websitePage.links, websitePage.page.url, 5);
+      const extraLinks = candidateResearchLinks(websitePage.links, websitePage.page.url, 12);
       for (const link of extraLinks) {
         await addPage(link.url, researchLinkScore(link) >= 40 ? 'research' : 'website', link.text || 'research');
-        await onProgress(`Waterfall onderzoekt ${lead.company_name}: ${researchPages.length} pagina's bekeken.`);
+        if (researchPages.length % 3 === 0) {
+          await onProgress(`Waterfall onderzoekt ${lead.company_name}: ${researchPages.length} pagina's bekeken.`);
+        }
       }
     }
   }
@@ -1085,7 +1123,14 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   const phones = extractPhones(combinedText);
   const employeeRange = extractEmployeeRange(combinedText);
   const branches = findMatchingTerms(criteria.branches, `${lead.company_name} ${combinedText}`.toLowerCase());
-  const managementContacts = extractManagementContacts(combinedText, website ? hostWithoutWww(website) : '', emailPattern);
+  const domain = website ? hostWithoutWww(website) : '';
+  const managementContacts = [
+    ...extractManagementContacts(combinedText, domain, emailPattern),
+    ...extractRoleSignals(combinedText, domain, emailPattern),
+  ].filter((contact, index, all) => {
+    const key = `${contact.name}|${contact.role}|${contact.source_text}`.toLowerCase();
+    return all.findIndex((candidate) => `${candidate.name}|${candidate.role}|${candidate.source_text}`.toLowerCase() === key) === index;
+  }).slice(0, 12);
   const emailGuesses = [
     ...managementContacts.map((contact) => contact.email_guess).filter(Boolean),
     ...(website ? [`info@${hostWithoutWww(website)}`, `sales@${hostWithoutWww(website)}`] : []),
