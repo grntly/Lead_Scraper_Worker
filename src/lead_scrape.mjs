@@ -197,6 +197,10 @@ function sourceTypeIsListing(sourceType) {
   return ['ranking', 'directory', 'industry_page', 'list', 'listing'].includes(normalizeSourceType(sourceType));
 }
 
+function sourceTypeIsSingleWebsite(sourceType) {
+  return ['website', 'company_website', 'company'].includes(normalizeSourceType(sourceType));
+}
+
 function extractCells(rowHtml) {
   const cells = [];
   const regex = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi;
@@ -1329,12 +1333,14 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
   fetched.push(first.url);
   pageCache.set(startUrl.toString(), first);
   pageCache.set(first.url, first);
-  await progress('Lijstpagina opgehaald. Links en bedrijven worden nu geanalyseerd.');
+  await progress(sourceTypeIsSingleWebsite(sourceType)
+    ? 'Bedrijfswebsite opgehaald. De website wordt nu als één lead onderzocht.'
+    : 'Lijstpagina opgehaald. Links en bedrijven worden nu geanalyseerd.');
 
   if (!first.ok) {
     return {
       success: false,
-      message: `Lijstpagina gaf HTTP ${first.status}.`,
+      message: `${sourceTypeIsSingleWebsite(sourceType) ? 'Website' : 'Lijstpagina'} gaf HTTP ${first.status}.`,
       stats: {
         pages_fetched: 1,
         items_found: 0,
@@ -1346,12 +1352,22 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
 
   const baseUrl = payload.base_url || startUrl.toString();
   const baseHost = new URL(baseUrl).hostname.replace(/^www\./, '');
-  const tableRows = extractTableRows(first.body, first.url);
-  const listingLike = pageLooksLikeListing(first.body, sourceType);
+  const isSingleWebsiteSource = sourceTypeIsSingleWebsite(sourceType);
+  const tableRows = isSingleWebsiteSource ? [] : extractTableRows(first.body, first.url);
+  const listingLike = !isSingleWebsiteSource && pageLooksLikeListing(first.body, sourceType);
   const listRows = listingLike ? extractListCompanyCandidates(first.body, first.url) : [];
   const sourceRows = tableRows.length > 0 ? tableRows : listRows;
 
-  if (sourceRows.length > 0) {
+  if (isSingleWebsiteSource) {
+    leads.push(buildLeadFromPage({
+      sourceName: payload.source_name,
+      url: first.url,
+      html: first.body,
+      config,
+      criteria,
+    }));
+    await progress('Bedrijfswebsite als één lead aangemaakt. Interne pagina\'s worden aan deze lead toegevoegd.');
+  } else if (sourceRows.length > 0) {
     for (const row of sourceRows.slice(0, 150)) {
       const builder = tableRows.length > 0 ? buildLeadFromTableRow : buildLeadFromListingCandidate;
       leads.push(builder({
