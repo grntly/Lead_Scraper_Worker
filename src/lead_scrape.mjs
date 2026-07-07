@@ -164,6 +164,14 @@ function extractPhones(text) {
   return [...new Set(matches.map((phone) => phone.replace(/\s+/g, ' ').trim()))];
 }
 
+function removeContactNoise(text) {
+  return String(text || '')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, ' ')
+    .replace(/(?:\+31|0031|0)[\d\s().-]{8,}/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 const NL_PROVINCE_BY_POSTCODE_PREFIX = [
   { min: 1000, max: 1299, province: 'Noord-Holland' },
   { min: 1300, max: 1379, province: 'Flevoland' },
@@ -276,10 +284,10 @@ function extractLocationData(text) {
   let match;
 
   while ((match = postcodePattern.exec(normalized)) !== null) {
-    const before = normalized.slice(Math.max(0, match.index - 90), match.index);
-    const after = normalized.slice(postcodePattern.lastIndex, postcodePattern.lastIndex + 70);
+    const before = removeContactNoise(normalized.slice(Math.max(0, match.index - 90), match.index));
+    const after = removeContactNoise(normalized.slice(postcodePattern.lastIndex, postcodePattern.lastIndex + 70));
     const streetMatch = before.match(/([A-ZÀ-ÖØ-Þ][\p{L}'’.\-\s]{2,70}?\s+\d{1,5}\s*[A-Z]?(?:\s*[-/]\s*\d{1,5}\s*[A-Z]?)?)\s*,?\s*$/u);
-    const cityMatch = after.match(/^\s*,?\s*([A-ZÀ-ÖØ-Þ][\p{L}'’.\-\s]{1,50})(?=\s*(?:[,|•\-]|Nederland|The Netherlands|Tel|Telefoon|Phone|Mail|E-mail|Email|$))/u);
+    const cityMatch = after.match(/^\s*,?\s*([A-ZÀ-ÖØ-Þ][\p{L}'’.\-\s]{1,50})(?=\s*(?:[:;,|•\-]|Nederland|The Netherlands|Tel|Telefoon|Phone|Mail|E-mail|Email|$))/u);
 
     result.postcode = `${match[1]} ${match[2].toUpperCase()}`;
     result.city = cityMatch ? cleanLocationPart(cityMatch[1]) : result.city;
@@ -289,14 +297,6 @@ function extractLocationData(text) {
 
     if (result.city) {
       break;
-    }
-  }
-
-  const labelledAddress = normalized.match(/\b(?:adres|address)\s*:?\s*([^|•\n\r]{8,140})/i);
-  if (labelledAddress) {
-    const value = cleanLocationPart(labelledAddress[1]);
-    if (value && (!result.address || value.length > result.address.length)) {
-      result.address = value;
     }
   }
 
@@ -547,8 +547,9 @@ function filterLinks(links, config, baseHost) {
 }
 
 function extractEmployeeRange(text) {
-  const value = String(text || '').toLowerCase();
-  const range = value.match(/(\d{1,5})\s*[-–]\s*(\d{1,5})\s*(medewerkers|employees|fte)?/i);
+  const value = removeContactNoise(text).toLowerCase();
+  const employeeWord = '(?:medewerkers|werknemers|personeel|employees|fte)';
+  const range = value.match(new RegExp(`(\\d{1,5})\\s*[-–]\\s*(\\d{1,5})\\s*${employeeWord}`, 'i'));
   if (range) {
     return {
       text: range[0],
@@ -557,7 +558,7 @@ function extractEmployeeRange(text) {
     };
   }
 
-  const minimum = value.match(/(?:meer dan|over|at least|minimaal)\s*(\d{1,5})\s*(medewerkers|employees|fte)?/i);
+  const minimum = value.match(new RegExp(`(?:meer dan|over|at least|minimaal)\\s*(\\d{1,5})\\s*${employeeWord}`, 'i'));
   if (minimum) {
     return {
       text: minimum[0],
@@ -566,7 +567,7 @@ function extractEmployeeRange(text) {
     };
   }
 
-  const single = value.match(/(\d{1,5})\s*(medewerkers|employees|fte)/i);
+  const single = value.match(new RegExp(`(\\d{1,5})\\s*${employeeWord}`, 'i'));
   if (single) {
     return {
       text: single[0],
@@ -1212,6 +1213,72 @@ function fetchErrorMessage(error, url) {
   return `${error && error.message ? error.message : String(error)}: ${url}`;
 }
 
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function cleanBusinessDescriptionText(text, companyName = '') {
+  const companyWords = String(companyName || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length >= 4);
+  const businessWords = /\b(subsidie|subsidies|innovatie|software|ontwikkeling|diensten|service|bedrijf|organisatie|oplossingen|advies|consultancy|cloud|data|security|saas|branche|technologie|projecten|klanten|markt|expertise)\b/i;
+  const navWords = /\b(home|menu|blog|werken bij|contact|mijn hsl|over ons|algemene voorwaarden|privacy|cookies|login|nieuwsbrief|read more|lees meer)\b/i;
+  const navWordsGlobal = /\b(home|menu|blog|werken bij|contact|mijn hsl|over ons|algemene voorwaarden|privacy|cookies|login|nieuwsbrief|read more|lees meer)\b/gi;
+  let prepared = String(text || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^(?:home|subsidies|diensten|over ons|blog|werken bij|contact|mijn hsl)\b(?:\s+|$)/i, '')
+    .replace(/^(?:home|subsidies|diensten|over ons|blog|werken bij|contact|mijn hsl)\b(?:\s+|$)/i, '')
+    .replace(/^(?:home|subsidies|diensten|over ons|blog|werken bij|contact|mijn hsl)\b(?:\s+|$)/i, '')
+    .replace(/^(?:home|subsidies|diensten|over ons|blog|werken bij|contact|mijn hsl)\b(?:\s+|$)/i, '')
+    .replace(/^(?:home|subsidies|diensten|over ons|blog|werken bij|contact|mijn hsl)\b(?:\s+|$)/i, '')
+    .replace(/^(?:home|subsidies|diensten|over ons|blog|werken bij|contact|mijn hsl)\b(?:\s+|$)/i, '')
+    .replace(/^(?:home|subsidies|diensten|over ons|blog|werken bij|contact|mijn hsl)\b(?:\s+|$)/i, '')
+    .replace(/^(?:home|subsidies|diensten|over ons|blog|werken bij|contact|mijn hsl)\b(?:\s+|$)/i, '');
+
+  const companyPattern = escapeRegExp(companyName);
+  if (companyPattern) {
+    prepared = prepared.replace(new RegExp(`^(?:${companyPattern}\\s*){1,3}`, 'i'), '');
+  }
+
+  const chunks = prepared
+    .split(/(?<=[.!?])\s+|(?:\s{2,})|[|•]/)
+    .map((chunk) => removeContactNoise(chunk).trim())
+    .filter((chunk) => chunk.length >= 45 && chunk.length <= 360)
+    .filter((chunk) => !/^home\b/i.test(chunk))
+    .filter((chunk) => {
+      const lower = chunk.toLowerCase();
+      const navHits = (lower.match(navWordsGlobal) || []).length;
+      const businessHit = businessWords.test(chunk) || companyWords.some((word) => lower.includes(word));
+      return businessHit && navHits <= 2;
+    });
+
+  const unique = [];
+  for (const chunk of chunks) {
+    const key = chunk.toLowerCase().replace(/[^a-z0-9]+/g, ' ').slice(0, 120);
+    if (!unique.some((item) => item.key === key || item.text.includes(chunk) || chunk.includes(item.text))) {
+      unique.push({ key, text: chunk });
+    }
+    if (unique.length >= 3) {
+      break;
+    }
+  }
+
+  return unique.map((item) => item.text).join(' ').slice(0, 900);
+}
+
+function businessDescriptionFromHtml(html, text, companyName) {
+  const meta = metaDescriptionFromHtml(html);
+  const cleanedMeta = cleanBusinessDescriptionText(meta, companyName);
+  if (cleanedMeta) {
+    return cleanedMeta;
+  }
+
+  return cleanBusinessDescriptionText(text, companyName) || meta || String(text || '').slice(0, 700);
+}
+
 function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
   const text = stripTags(html);
   const emails = extractEmails(text);
@@ -1219,9 +1286,8 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
   const location = extractLocationData(text);
   const links = extractLinks(html, url);
   const companySelector = selectorConfig(config, ['detail', 'company_name'], 'h1, title');
-  const descriptionSelector = selectorConfig(config, ['detail', 'description'], 'meta[name="description"], main, body');
   const company = extractBySelector(html, companySelector.selector, titleFromHtml(html)) || sourceName || new URL(url).hostname.replace(/^www\./, '');
-  const description = (extractBySelector(html, descriptionSelector.selector, metaDescriptionFromHtml(html)) || text).slice(0, 700);
+  const description = businessDescriptionFromHtml(html, text, company);
   const employeeRange = extractEmployeeRange(text);
   const branches = findMatchingTerms(criteria.branches, `${company} ${description}`.toLowerCase());
   const enrichmentLinks = classifyEnrichmentLinks(links);
@@ -1394,9 +1460,9 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   ].filter((term, index, all) => all.indexOf(term) === index).slice(0, 30);
 
   const descriptionParts = [
-    lead.description,
-    combinedText.slice(0, 700),
-  ].filter(Boolean);
+    cleanBusinessDescriptionText(lead.description, lead.company_name),
+    cleanBusinessDescriptionText(combinedText, lead.company_name),
+  ].filter(Boolean).filter((part, index, all) => all.findIndex((candidate) => candidate.toLowerCase() === part.toLowerCase()) === index);
   const researchSummary = [
     `Waterfall: ${researchPages.length} pagina's onderzocht.`,
     website ? `Bedrijfswebsite: ${website}.` : '',
@@ -1418,7 +1484,7 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     province: lead.province || location.province || '',
     country: lead.country || location.country || '',
     industry: lead.industry || branches[0] || '',
-    description: descriptionParts.join('\n\n').slice(0, 1800),
+    description: descriptionParts.join('\n\n').slice(0, 1800) || lead.description,
     employee_count_text: lead.employee_count_text || employeeRange.text,
     employee_count_min: lead.employee_count_min ?? employeeRange.min,
     employee_count_max: lead.employee_count_max ?? employeeRange.max,
