@@ -164,6 +164,145 @@ function extractPhones(text) {
   return [...new Set(matches.map((phone) => phone.replace(/\s+/g, ' ').trim()))];
 }
 
+const NL_PROVINCE_BY_POSTCODE_PREFIX = [
+  { min: 1000, max: 1299, province: 'Noord-Holland' },
+  { min: 1300, max: 1379, province: 'Flevoland' },
+  { min: 1380, max: 1384, province: 'Noord-Holland' },
+  { min: 1385, max: 3899, province: 'Utrecht' },
+  { min: 3900, max: 3999, province: 'Utrecht' },
+  { min: 4000, max: 4119, province: 'Gelderland' },
+  { min: 4120, max: 4129, province: 'Utrecht' },
+  { min: 4130, max: 5339, province: 'Gelderland' },
+  { min: 5340, max: 5765, province: 'Noord-Brabant' },
+  { min: 5766, max: 5817, province: 'Limburg' },
+  { min: 5820, max: 5846, province: 'Noord-Brabant' },
+  { min: 5850, max: 6019, province: 'Limburg' },
+  { min: 6020, max: 6029, province: 'Noord-Brabant' },
+  { min: 6030, max: 6499, province: 'Limburg' },
+  { min: 6500, max: 7439, province: 'Gelderland' },
+  { min: 7440, max: 7739, province: 'Overijssel' },
+  { min: 7740, max: 7799, province: 'Drenthe' },
+  { min: 7800, max: 7959, province: 'Drenthe' },
+  { min: 7960, max: 7999, province: 'Overijssel' },
+  { min: 8000, max: 8049, province: 'Overijssel' },
+  { min: 8050, max: 8054, province: 'Gelderland' },
+  { min: 8055, max: 8069, province: 'Overijssel' },
+  { min: 8070, max: 8099, province: 'Gelderland' },
+  { min: 8100, max: 8159, province: 'Overijssel' },
+  { min: 8160, max: 8199, province: 'Gelderland' },
+  { min: 8200, max: 8259, province: 'Flevoland' },
+  { min: 8260, max: 8299, province: 'Overijssel' },
+  { min: 8300, max: 8329, province: 'Flevoland' },
+  { min: 8330, max: 8359, province: 'Overijssel' },
+  { min: 8360, max: 8389, province: 'Drenthe' },
+  { min: 8390, max: 9299, province: 'Friesland' },
+  { min: 9300, max: 9349, province: 'Drenthe' },
+  { min: 9350, max: 9399, province: 'Groningen' },
+  { min: 9400, max: 9499, province: 'Drenthe' },
+  { min: 9500, max: 9999, province: 'Groningen' },
+];
+
+function provinceFromDutchPostcode(postcode) {
+  const prefix = Number(String(postcode || '').replace(/\D/g, '').slice(0, 4));
+  if (!Number.isFinite(prefix)) {
+    return '';
+  }
+
+  const match = NL_PROVINCE_BY_POSTCODE_PREFIX.find((range) => prefix >= range.min && prefix <= range.max);
+  return match ? match.province : '';
+}
+
+function provinceFromDutchCity(city) {
+  const normalized = String(city || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z\s-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const cityMap = {
+    amsterdam: 'Noord-Holland',
+    rotterdam: 'Zuid-Holland',
+    'den haag': 'Zuid-Holland',
+    's gravenhage': 'Zuid-Holland',
+    utrecht: 'Utrecht',
+    eindhoven: 'Noord-Brabant',
+    tilburg: 'Noord-Brabant',
+    breda: 'Noord-Brabant',
+    groningen: 'Groningen',
+    almere: 'Flevoland',
+    nijmegen: 'Gelderland',
+    arnhem: 'Gelderland',
+    haarlem: 'Noord-Holland',
+    enschede: 'Overijssel',
+    amersfoort: 'Utrecht',
+    apeldoorn: 'Gelderland',
+    's hertogenbosch': 'Noord-Brabant',
+    'den bosch': 'Noord-Brabant',
+    zwolle: 'Overijssel',
+    leiden: 'Zuid-Holland',
+    maastricht: 'Limburg',
+    dordrecht: 'Zuid-Holland',
+    leeuwarden: 'Friesland',
+  };
+
+  return cityMap[normalized] || '';
+}
+
+function cleanLocationPart(value) {
+  return String(value || '')
+    .replace(/\b(?:nederland|the netherlands|tel(?:efoon)?|phone|mail|email|e-mail|adres|address)\b/gi, ' ')
+    .replace(/^[^\p{L}\d]+|[^\p{L}\d]+$/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractLocationData(text) {
+  const normalized = String(text || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const result = {
+    address: '',
+    postcode: '',
+    city: '',
+    province: '',
+    country: '',
+  };
+
+  const postcodePattern = /\b([1-9][0-9]{3})\s*([A-Z]{2})\b/gi;
+  let match;
+
+  while ((match = postcodePattern.exec(normalized)) !== null) {
+    const before = normalized.slice(Math.max(0, match.index - 90), match.index);
+    const after = normalized.slice(postcodePattern.lastIndex, postcodePattern.lastIndex + 70);
+    const streetMatch = before.match(/([A-ZÀ-ÖØ-Þ][\p{L}'’.\-\s]{2,70}?\s+\d{1,5}\s*[A-Z]?(?:\s*[-/]\s*\d{1,5}\s*[A-Z]?)?)\s*,?\s*$/u);
+    const cityMatch = after.match(/^\s*,?\s*([A-ZÀ-ÖØ-Þ][\p{L}'’.\-\s]{1,50})(?=\s*(?:[,|•\-]|Nederland|The Netherlands|Tel|Telefoon|Phone|Mail|E-mail|Email|$))/u);
+
+    result.postcode = `${match[1]} ${match[2].toUpperCase()}`;
+    result.city = cityMatch ? cleanLocationPart(cityMatch[1]) : result.city;
+    result.address = streetMatch ? cleanLocationPart(`${streetMatch[1]}, ${result.postcode}${result.city ? ` ${result.city}` : ''}`) : result.address;
+    result.province = provinceFromDutchCity(result.city) || provinceFromDutchPostcode(result.postcode);
+    result.country = result.country || 'Nederland';
+
+    if (result.city) {
+      break;
+    }
+  }
+
+  const labelledAddress = normalized.match(/\b(?:adres|address)\s*:?\s*([^|•\n\r]{8,140})/i);
+  if (labelledAddress) {
+    const value = cleanLocationPart(labelledAddress[1]);
+    if (value && (!result.address || value.length > result.address.length)) {
+      result.address = value;
+    }
+  }
+
+  return result;
+}
+
 function extractLinks(html, baseUrl) {
   const links = [];
   const regex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
@@ -865,7 +1004,7 @@ async function discoverWebsiteBySearch(companyName, timeoutSeconds, fetched, err
 function scoreLead(lead, criteria) {
   let score = 30;
   const reasons = [];
-  const haystack = `${lead.company_name} ${lead.description} ${lead.industry}`.toLowerCase();
+  const haystack = `${lead.company_name} ${lead.description} ${lead.industry} ${lead.city || ''} ${lead.province || ''} ${lead.address || ''}`.toLowerCase();
 
   if (lead.website) {
     score += 20;
@@ -878,6 +1017,10 @@ function scoreLead(lead, criteria) {
   if (lead.phone) {
     score += 10;
     reasons.push('telefoonnummer gevonden');
+  }
+  if (lead.city || lead.address) {
+    score += 5;
+    reasons.push('locatie/adres gevonden');
   }
 
   const matched = findMatchingTerms(criteria.keywords, haystack);
@@ -1073,6 +1216,7 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
   const text = stripTags(html);
   const emails = extractEmails(text);
   const phones = extractPhones(text);
+  const location = extractLocationData(text);
   const links = extractLinks(html, url);
   const companySelector = selectorConfig(config, ['detail', 'company_name'], 'h1, title');
   const descriptionSelector = selectorConfig(config, ['detail', 'description'], 'meta[name="description"], main, body');
@@ -1087,6 +1231,10 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
     website: url,
     email: emails[0] || '',
     phone: phones[0] || '',
+    address: location.address,
+    city: location.city,
+    province: location.province,
+    country: location.country,
     description,
     industry: branches[0] || '',
     employee_count_min: employeeRange.min,
@@ -1098,6 +1246,11 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
     website: url,
     email: emails[0] || '',
     phone: phones[0] || '',
+    address: location.address,
+    postcode: location.postcode,
+    city: location.city,
+    province: location.province,
+    country: location.country,
     description,
     industry: branches[0] || '',
     employee_count_text: employeeRange.text,
@@ -1197,6 +1350,7 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   const combinedText = allTexts.join('\n').slice(0, 120000);
   const emails = extractEmails(combinedText);
   const phones = extractPhones(combinedText);
+  const location = extractLocationData(combinedText);
   const employeeRange = extractEmployeeRange(combinedText);
   const branches = findMatchingTerms(criteria.branches, `${lead.company_name} ${combinedText}`.toLowerCase());
   const domain = website ? hostWithoutWww(website) : '';
@@ -1250,6 +1404,7 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     managementContacts.length ? `Mogelijke leiding/contactpersonen: ${managementContacts.map((contact) => `${contact.name} (${contact.role})`).join(', ')}.` : '',
     emails.length ? `Publieke e-mails gevonden: ${emails.slice(0, 3).join(', ')}.` : '',
     phones.length ? `Publieke telefoons gevonden: ${phones.slice(0, 3).join(', ')}.` : '',
+    location.address ? `Adres gevonden: ${location.address}.` : '',
   ].filter(Boolean).join(' ');
 
   const enriched = {
@@ -1257,6 +1412,11 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     website: website || lead.website,
     email: lead.email || emails[0] || '',
     phone: lead.phone || phones[0] || '',
+    address: lead.address || location.address || '',
+    postcode: lead.postcode || location.postcode || '',
+    city: lead.city || location.city || '',
+    province: lead.province || location.province || '',
+    country: lead.country || location.country || '',
     industry: lead.industry || branches[0] || '',
     description: descriptionParts.join('\n\n').slice(0, 1800),
     employee_count_text: lead.employee_count_text || employeeRange.text,
