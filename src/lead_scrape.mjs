@@ -579,6 +579,54 @@ function extractEmployeeRange(text) {
   return { text: '', min: null, max: null };
 }
 
+function extractSAndOEmployees(text) {
+  const value = removeContactNoise(text);
+  const patterns = [
+    /\b(?:s&o|wbs[o0]|speur-?\s*en\s*ontwikkelingswerk|r&d)\b.{0,80}?\b(\d{1,5})\s*(?:medewerkers|werknemers|fte|employees)\b/i,
+    /\b(\d{1,5})\s*(?:medewerkers|werknemers|fte|employees)\b.{0,80}?\b(?:s&o|wbs[o0]|speur-?\s*en\s*ontwikkelingswerk|r&d)\b/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+    if (match) {
+      return match[0].replace(/\s+/g, ' ').trim().slice(0, 191);
+    }
+  }
+
+  return '';
+}
+
+function extractPotentialOpportunities(text, criteria = {}) {
+  const haystack = String(text || '').toLowerCase();
+  const opportunities = [];
+  const checks = [
+    ['WBSO / S&O', /\b(wbso|s&o|speur-?\s*en\s*ontwikkelingswerk|r&d|research\s*&\s*development)\b/i],
+    ['Innovatiebox', /\b(innovatiebox|patent|octrooi|intellectual property|ip)\b/i],
+    ['Subsidie innovatieproject', /\b(innovatie|ontwikkeling|prototype|pilot|proof of concept|technologie)\b/i],
+    ['Duurzaamheid / energie', /\b(duurzaam|energie|co2|circular|circulair|emissie|klimaat)\b/i],
+    ['Digitalisering', /\b(software|saas|cloud|data|ai|kunstmatige intelligentie|automatisering|platform)\b/i],
+  ];
+
+  for (const [label, pattern] of checks) {
+    if (pattern.test(haystack)) {
+      opportunities.push(label);
+    }
+  }
+
+  const criteriaTerms = [
+    ...(Array.isArray(criteria.keywords) ? criteria.keywords : []),
+    ...(Array.isArray(criteria.branches) ? criteria.branches : []),
+  ];
+  for (const term of criteriaTerms) {
+    const clean = String(term || '').trim();
+    if (clean && haystack.includes(clean.toLowerCase())) {
+      opportunities.push(clean);
+    }
+  }
+
+  return [...new Set(opportunities)].slice(0, 10);
+}
+
 function findMatchingTerms(terms, haystack) {
   return (Array.isArray(terms) ? terms : [])
     .map((term) => String(term || '').trim())
@@ -929,6 +977,64 @@ function uniqueManagementContacts(contacts, limit = 10) {
   return unique;
 }
 
+function bestEmailForContact(contact, emails) {
+  const cleanedName = cleanContactName(contact.name || '');
+  const parts = cleanedName
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]+/g, ' ')
+    .split(/[\s-]+/)
+    .filter(Boolean);
+  const first = parts[0] || '';
+  const last = parts.length > 1 ? parts[parts.length - 1] : '';
+  const nameKey = normalizeContactNameKey(cleanedName);
+
+  for (const email of emails) {
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    const local = normalizedEmail.replace(/@.+$/, '');
+    const localKey = normalizeContactNameKey(local.replace(/[._-]+/g, ' '));
+
+    if (!normalizedEmail || !localKey) {
+      continue;
+    }
+
+    if ((first && local === first)
+      || (nameKey && localKey.includes(nameKey))
+      || (first && last && localKey.includes(first) && localKey.includes(last))) {
+      return normalizedEmail;
+    }
+  }
+
+  return String(contact.email_guess || '').trim().toLowerCase();
+}
+
+function contactsFromEmails(emails, domain) {
+  return emails
+    .map((email) => String(email || '').trim().toLowerCase())
+    .filter((email) => email.endsWith(`@${domain}`))
+    .map((email) => {
+      const local = email.replace(/@.+$/, '');
+      if (/^(info|sales|support|admin|contact|hello|hoi|mail|office|noreply|no-reply)$/.test(local)) {
+        return null;
+      }
+
+      const parts = local.split(/[._-]+/).filter((part) => part.length >= 2);
+      if (!parts.length) {
+        return null;
+      }
+
+      const name = parts.map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ');
+      return {
+        name,
+        role: '',
+        source_text: email,
+        email_guess: email,
+      };
+    })
+    .filter(Boolean);
+}
+
 function extractManagementContacts(text, domain, emailPattern = '') {
   const roles = [
     'ceo', 'cfo', 'cto', 'coo', 'chief executive officer', 'chief financial officer', 'chief technology officer',
@@ -1041,7 +1147,7 @@ async function discoverWebsiteByCompanyName(companyName, timeoutSeconds, fetched
   return '';
 }
 
-function duckDuckGoResultUrls(html) {
+function searchResultUrlsFromHtml(html, baseUrl) {
   const urls = [];
   const hrefRegex = /<a\b[^>]*href=["']([^"']+)["'][^>]*>/gi;
   let match;
@@ -1049,8 +1155,8 @@ function duckDuckGoResultUrls(html) {
   while ((match = hrefRegex.exec(String(html || ''))) !== null) {
     let href = decodeEntities(match[1]);
     try {
-      const parsed = new URL(href, 'https://duckduckgo.com/');
-      const redirected = parsed.searchParams.get('uddg');
+      const parsed = new URL(href, baseUrl);
+      const redirected = parsed.searchParams.get('uddg') || parsed.searchParams.get('q') || parsed.searchParams.get('url');
       if (redirected) {
         href = redirected;
       } else {
@@ -1065,7 +1171,7 @@ function duckDuckGoResultUrls(html) {
     }
 
     const host = hostWithoutWww(href);
-    if (!host || isSocialOrDirectoryHost(host) || /duckduckgo\.com$/i.test(host)) {
+    if (!host || /(^|\.)((duckduckgo|google|bing)\.[a-z.]+)$/i.test(host)) {
       continue;
     }
 
@@ -1075,23 +1181,114 @@ function duckDuckGoResultUrls(html) {
   return urls.filter((url, index, all) => all.findIndex((candidate) => candidate === url) === index).slice(0, 8);
 }
 
+async function searchResultUrls(query, timeoutSeconds, fetched, errors, pageCache, options = {}) {
+  if (options.enabled === false) {
+    return [];
+  }
+
+  const encodedQuery = encodeURIComponent(query);
+  const searchUrls = [
+    `https://www.google.com/search?q=${encodedQuery}&num=10`,
+    `https://duckduckgo.com/html/?q=${encodedQuery}`,
+  ];
+  const results = [];
+
+  for (const searchUrl of searchUrls) {
+    const searchPage = await fetchResearchPage(searchUrl, timeoutSeconds, fetched, errors, pageCache, { silent: true });
+    if (!searchPage) {
+      continue;
+    }
+
+    for (const url of searchResultUrlsFromHtml(searchPage.body, searchUrl)) {
+      if (!results.includes(url)) {
+        results.push(url);
+      }
+    }
+
+    if (results.length >= (options.limit || 8)) {
+      break;
+    }
+  }
+
+  return results.slice(0, options.limit || 8);
+}
+
 async function discoverWebsiteBySearch(companyName, timeoutSeconds, fetched, errors, pageCache, options = {}) {
   if (options.enabled === false) {
     return '';
   }
 
-  const query = encodeURIComponent(`"${companyName}" bedrijf website`);
-  const searchUrl = `https://duckduckgo.com/html/?q=${query}`;
-  const searchPage = await fetchResearchPage(searchUrl, timeoutSeconds, fetched, errors, pageCache, { silent: true });
-  if (!searchPage) {
-    return '';
-  }
-
-  const resultUrls = duckDuckGoResultUrls(searchPage.body);
+  const resultUrls = await searchResultUrls(`"${companyName}" bedrijf website`, timeoutSeconds, fetched, errors, pageCache, {
+    enabled: options.enabled,
+    limit: 8,
+  });
   for (const url of resultUrls.slice(0, 5)) {
+    if (isSocialOrDirectoryHost(hostWithoutWww(url))) {
+      continue;
+    }
+
     const page = await fetchResearchPage(url, timeoutSeconds, fetched, errors, pageCache, { silent: true });
     if (page && pageMatchesCompany(page, companyName)) {
       return page.url;
+    }
+  }
+
+  return '';
+}
+
+async function discoverSocialLinksBySearch(companyName, timeoutSeconds, fetched, errors, pageCache, options = {}) {
+  if (options.enabled === false) {
+    return [];
+  }
+
+  const queries = [
+    `"${companyName}" LinkedIn`,
+    `"${companyName}" Facebook Instagram`,
+  ];
+  const links = [];
+
+  for (const query of queries) {
+    const resultUrls = await searchResultUrls(query, timeoutSeconds, fetched, errors, pageCache, {
+      enabled: options.enabled,
+      limit: 6,
+    });
+
+    for (const url of resultUrls) {
+      const haystack = url.toLowerCase();
+      if (!/(linkedin\.com|facebook\.com|instagram\.com|x\.com|twitter\.com|youtube\.com|tiktok\.com)/.test(haystack)) {
+        continue;
+      }
+
+      links.push({
+        url,
+        text: companyName,
+      });
+    }
+  }
+
+  return classifyEnrichmentLinks(links);
+}
+
+async function discoverPersonLinkedInUrl(personName, companyName, timeoutSeconds, fetched, errors, pageCache, options = {}) {
+  if (options.enabled === false || !personName) {
+    return '';
+  }
+
+  const resultUrls = await searchResultUrls(`"${personName}" "${companyName}" LinkedIn`, timeoutSeconds, fetched, errors, pageCache, {
+    enabled: options.enabled,
+    limit: 5,
+  });
+  const personKey = normalizeContactNameKey(personName);
+
+  for (const url of resultUrls) {
+    const match = String(url).match(/linkedin\.com\/(?:in|pub)\/([^/?#]+)/i);
+    if (!match) {
+      continue;
+    }
+
+    const slugKey = normalizeContactNameKey(match[1].replace(/[-_]+/g, ' '));
+    if (!personKey || !slugKey || slugKey.includes(personKey) || personKey.includes(slugKey)) {
+      return url;
     }
   }
 
@@ -1309,6 +1506,20 @@ function fetchErrorMessage(error, url) {
   return `${error && error.message ? error.message : String(error)}: ${url}`;
 }
 
+function runItemFromErrorMessage(error) {
+  const value = String(error || '');
+  const urlMatch = value.match(/https?:\/\/\S+/);
+  const httpMatch = value.match(/HTTP\s+(\d{3})/i);
+
+  return {
+    detail_url: urlMatch ? urlMatch[0] : '',
+    raw_title: urlMatch ? urlMatch[0] : 'Scraper fout',
+    status: 'failed',
+    http_code: httpMatch ? Number(httpMatch[1]) : null,
+    error_text: value,
+  };
+}
+
 function escapeRegExp(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -1385,6 +1596,8 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
   const company = extractBySelector(html, companySelector.selector, titleFromHtml(html)) || sourceName || new URL(url).hostname.replace(/^www\./, '');
   const description = businessDescriptionFromHtml(html, text, company);
   const employeeRange = extractEmployeeRange(text);
+  const sAndOEmployees = extractSAndOEmployees(text);
+  const potentialOpportunities = extractPotentialOpportunities(text, criteria);
   const branches = findMatchingTerms(criteria.branches, `${company} ${description}`.toLowerCase());
   const socialLinks = classifyEnrichmentLinks(links).filter((link) => ['linkedin', 'social'].includes(link.link_type));
   const emailHint = emailPatternHint(criteria.email_pattern_example, url);
@@ -1418,6 +1631,8 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
     employee_count_text: employeeRange.text,
     employee_count_min: employeeRange.min,
     employee_count_max: employeeRange.max,
+    s_and_o_employees: sAndOEmployees,
+    potential_opportunities: potentialOpportunities,
     criteria_score: scored.score,
     criteria_reason: emailHint ? `${scored.reason}; e-mailpatroon hint: ${emailHint}` : scored.reason,
     enrichment_links: socialLinks,
@@ -1515,22 +1730,52 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   const phones = extractPhones(combinedText);
   const location = extractLocationData(combinedText);
   const employeeRange = extractEmployeeRange(combinedText);
+  const sAndOEmployees = extractSAndOEmployees(combinedText);
+  const potentialOpportunities = extractPotentialOpportunities(`${lead.description || ''}\n${combinedText}`, criteria);
   const branches = findMatchingTerms(criteria.branches, `${lead.company_name} ${combinedText}`.toLowerCase());
   const domain = website ? hostWithoutWww(website) : '';
-  const managementContacts = uniqueManagementContacts([
+  let managementContacts = uniqueManagementContacts([
     ...extractManagementContacts(combinedText, domain, emailPattern),
     ...extractRoleSignals(combinedText, domain, emailPattern),
+    ...contactsFromEmails(emails, domain),
   ], 12);
+  managementContacts = managementContacts.map((contact) => ({
+    ...contact,
+    email_guess: bestEmailForContact(contact, emails),
+  }));
+  managementContacts = uniqueManagementContacts(managementContacts, 12);
+
+  const searchEnabled = config.enable_search_discovery !== false;
+  const searchedSocialLinks = await discoverSocialLinksBySearch(lead.company_name, timeoutSeconds, fetched, errors, pageCache, {
+    enabled: searchEnabled,
+  });
+  for (let index = 0; index < Math.min(managementContacts.length, 8); index++) {
+    if (managementContacts[index].linkedin_url) {
+      continue;
+    }
+
+    const linkedinUrl = await discoverPersonLinkedInUrl(managementContacts[index].name, lead.company_name, timeoutSeconds, fetched, errors, pageCache, {
+      enabled: searchEnabled,
+    });
+    if (linkedinUrl) {
+      managementContacts[index].linkedin_url = linkedinUrl;
+    }
+  }
+
   const emailGuesses = [
     ...managementContacts.map((contact) => contact.email_guess).filter(Boolean),
     ...(website ? [`info@${hostWithoutWww(website)}`, `sales@${hostWithoutWww(website)}`] : []),
-  ].filter((email, index, all) => email && all.indexOf(email) === index).slice(0, 10);
-  const classifiedLinks = classifyEnrichmentLinks(allLinks);
+  ].filter((email, index, all) => email && all.indexOf(email) === index).slice(0, 12);
+  const classifiedLinks = [
+    ...classifyEnrichmentLinks(allLinks),
+    ...searchedSocialLinks,
+  ];
   const socialLinks = [
     ...(Array.isArray(lead.enrichment_links) ? lead.enrichment_links : []),
     ...classifiedLinks,
   ]
     .filter((link) => ['linkedin', 'social'].includes(link.link_type))
+    .filter((link) => !/linkedin\.com\/(in|pub)\//i.test(link.url))
     .filter((link, index, all) => link.url && all.findIndex((candidate) => normalizedLinkKey(candidate.url) === normalizedLinkKey(link.url)) === index)
     .slice(0, 20);
   const enrichmentLinks = socialLinks;
@@ -1554,6 +1799,10 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     employee_count_text: lead.employee_count_text || employeeRange.text,
     employee_count_min: lead.employee_count_min ?? employeeRange.min,
     employee_count_max: lead.employee_count_max ?? employeeRange.max,
+    s_and_o_employees: lead.s_and_o_employees || sAndOEmployees,
+    potential_opportunities: Array.isArray(lead.potential_opportunities) && lead.potential_opportunities.length
+      ? lead.potential_opportunities
+      : potentialOpportunities,
     enrichment_links: enrichmentLinks,
     all_emails: emails.slice(0, 30),
     all_phones: phones.slice(0, 30),
@@ -1627,15 +1876,23 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
     : 'Lijstpagina opgehaald. Links en bedrijven worden nu geanalyseerd.');
 
   if (!first.ok) {
+    const message = `${sourceTypeIsSingleWebsite(sourceType) ? 'Website' : 'Lijstpagina'} gaf HTTP ${first.status}.`;
     return {
       success: false,
-      message: `${sourceTypeIsSingleWebsite(sourceType) ? 'Website' : 'Lijstpagina'} gaf HTTP ${first.status}.`,
+      message,
       stats: {
         pages_fetched: 1,
         items_found: 0,
         errors_count: 1,
       },
       leads: [],
+      run_items: [{
+        detail_url: first.url,
+        raw_title: payload.source_name || first.url,
+        status: 'failed',
+        http_code: first.status,
+        error_text: message,
+      }],
     };
   }
 
@@ -1743,10 +2000,7 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
       errors_count: errors.length,
     },
     leads: uniqueLeads,
-    run_items: errors.map((error) => ({
-      status: 'failed',
-      error_text: error,
-    })),
+    run_items: errors.map((error) => runItemFromErrorMessage(error)),
     config_used: {
       ...config,
       source_type: sourceType,

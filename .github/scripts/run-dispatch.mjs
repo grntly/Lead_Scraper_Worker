@@ -131,6 +131,10 @@ main().catch(async (error) => {
         errors_count: 1,
       },
       leads: [],
+      run_items: [{
+        status: 'failed',
+        error_text: error.message || String(error),
+      }],
     }).catch((callbackError) => {
       console.error('Error callback failed:', callbackError);
     });
