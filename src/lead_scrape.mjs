@@ -184,136 +184,54 @@ function uniqueLinks(links, allowedTypes = []) {
 }
 
 function normalizePersonName(value) {
-  return cleanupContactName(value);
-}
-
-
-function decodePossiblyEncodedText(value) {
-  let text = String(value || '');
-  try {
-    text = decodeURIComponent(text);
-  } catch {
-    // Leave as-is when it is not valid percent-encoding.
-  }
-
-  return text
-    .replace(/&amp;/g, '&')
-    .replace(/&#038;/g, '&')
-    .replace(/&#8211;|&ndash;/g, '-')
-    .replace(/&#039;/g, "'")
-    .replace(/&quot;/g, '"');
-}
-
-function cleanupContactName(value) {
-  const name = decodePossiblyEncodedText(value)
-    .replace(/\b(load more|all downloads|downloads|meet|share|linkedin|facebook|instagram|personeel subsidies|contact|read more|lees meer)\b/gi, ' ')
-    .replace(/[^\p{L}\p{M}\s.'’-]/gu, ' ')
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/\b(linkedin|profiel|bekijk|contact|email|e-mail)\b/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-
-  const words = name.split(/\s+/).filter(Boolean);
-  if (words.length < 2 || words.length > 4 || name.length < 5 || name.length > 70) {
-    return '';
-  }
-
-  return name;
 }
-
-function contactNameKey(name) {
-  return cleanupContactName(name)
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '');
-}
-
-function contactScore(contact) {
-  return (contact.email ? 4 : 0)
-    + (contact.role ? 3 : 0)
-    + (contact.linkedin ? 2 : 0)
-    + (contact.phone ? 1 : 0);
-}
-
-function mergeContactData(a, b) {
-  const left = { ...(a || {}) };
-  const right = { ...(b || {}) };
-
-  for (const key of ['name', 'role', 'linkedin', 'email', 'email_guess', 'phone', 'source_text']) {
-    if (!left[key] && right[key]) {
-      left[key] = right[key];
-    }
-  }
-
-  if (contactScore(right) > contactScore(left)) {
-    return { ...left, ...Object.fromEntries(Object.entries(right).filter(([, value]) => value)) };
-  }
-
-  return left;
-}
-
 
 function uniqueManagementContacts(contacts) {
-  const buckets = new Map();
+  const seen = new Map();
+  const unique = [];
 
   for (const contact of Array.isArray(contacts) ? contacts : []) {
     if (!contact) continue;
 
-    const name = cleanupContactName(contact.name);
+    const name = normalizePersonName(contact.name);
     const email = String(contact.email || contact.email_guess || '').trim().toLowerCase();
     const linkedin = String(contact.linkedin || contact.linkedin_url || '').trim();
     const role = String(contact.role || contact.function || contact.title || '').replace(/\s+/g, ' ').trim();
-    const phone = String(contact.phone || '').trim();
 
     if (!name && !email && !linkedin) continue;
-    if (!name && !email) continue;
 
-    if (name && /\b(load more|download|share|facebook|instagram|personeel|subsidies)\b/i.test(name)) {
+    const key = email
+      ? `email:${email}`
+      : (linkedin ? `linkedin:${normalizeLinkKey(linkedin)}` : `name:${name.toLowerCase()}`);
+
+    if (seen.has(key)) {
+      const current = unique[seen.get(key)];
+      if (!current.email && email) current.email = email;
+      if (!current.email_guess && email) current.email_guess = email;
+      if (!current.linkedin && linkedin) current.linkedin = linkedin;
+      if (!current.role && role) current.role = role;
+      if (!current.phone && contact.phone) current.phone = contact.phone;
       continue;
     }
 
-    const nameKey = contactNameKey(name);
-    const emailLocalKey = email ? email.split('@')[0].replace(/[^a-z0-9]+/gi, '').toLowerCase() : '';
-    const keys = [
-      email ? `email:${email}` : '',
-      linkedin ? `linkedin:${normalizeLinkKey(linkedin)}` : '',
-      nameKey ? `name:${nameKey}` : '',
-      emailLocalKey ? `local:${emailLocalKey}` : '',
-    ].filter(Boolean);
-
-    const normalized = {
+    seen.set(key, unique.length);
+    unique.push({
       ...contact,
       name,
       role,
       linkedin,
       email: email || '',
       email_guess: email || String(contact.email_guess || '').trim().toLowerCase(),
-      phone,
-    };
-
-    let existingKey = '';
-    for (const key of keys) {
-      if (buckets.has(key)) {
-        existingKey = key;
-        break;
-      }
-    }
-
-    const merged = existingKey ? mergeContactData(buckets.get(existingKey), normalized) : normalized;
-    for (const key of keys) {
-      buckets.set(key, merged);
-    }
+      phone: String(contact.phone || '').trim(),
+    });
   }
 
-  const unique = [];
-  const seen = new Set();
-  for (const contact of buckets.values()) {
-    const key = `${contact.email || ''}|${normalizeLinkKey(contact.linkedin || '')}|${contactNameKey(contact.name || '')}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    unique.push(contact);
-  }
-
-  return unique.sort((a, b) => contactScore(b) - contactScore(a));
+  return unique;
 }
 
 
@@ -1006,7 +924,7 @@ function extractLinkedInProfileContactsFromLinks(links, domain, emailPattern = '
       try {
         const parts = new URL(url).pathname.split('/').filter(Boolean);
         const slug = parts[1] || '';
-        name = decodePossiblyEncodedText(slug)
+        name = slug
           .replace(/[-_]+/g, ' ')
           .replace(/\b\d+\b/g, '')
           .replace(/\s+/g, ' ')
@@ -1017,7 +935,6 @@ function extractLinkedInProfileContactsFromLinks(links, domain, emailPattern = '
       }
     }
 
-    name = cleanupContactName(name);
     if (!name || /^linkedin$/i.test(name)) {
       continue;
     }
@@ -1046,7 +963,7 @@ function extractTeamCardContactsFromHtml(html, domain, emailPattern = '') {
     const blockHtml = match[1];
     const text = stripTags(blockHtml).replace(/\s+/g, ' ').trim();
     const names = text.match(namePattern) || [];
-    const name = cleanupContactName(names.find((candidate) => !roleWords.test(candidate)) || names[0] || '');
+    const name = names.find((candidate) => !roleWords.test(candidate)) || names[0] || '';
     if (!name) continue;
 
     const role = (text.match(roleWords) || [''])[0];
@@ -1106,9 +1023,8 @@ function extractManagementContacts(text, domain, emailPattern = '') {
     const role = (line.match(new RegExp(rolePattern, 'i')) || [''])[0];
     const names = line.match(/\b[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'’-]+(?:\s+(?:van|de|den|der|het|ter|ten|op|aan|du|la|le|von|of))?(?:\s+[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'’-]+){1,3}\b/g) || [];
 
-    for (const rawName of names) {
-      const name = cleanupContactName(rawName);
-      if (!name || new RegExp(rolePattern, 'i').test(name)) {
+    for (const name of names) {
+      if (new RegExp(rolePattern, 'i').test(name)) {
         continue;
       }
 
