@@ -410,6 +410,117 @@ function extractLinks(html, baseUrl) {
   return links;
 }
 
+function extractHrefContactData(html) {
+  const emails = [];
+  const phones = [];
+  const regex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>/gi;
+  let match;
+
+  while ((match = regex.exec(String(html || ''))) !== null) {
+    const href = decodeEntities(match[1]).trim();
+    if (/^mailto:/i.test(href)) {
+      const email = href.replace(/^mailto:/i, '').split('?')[0].trim().toLowerCase();
+      if (email) emails.push(email);
+    }
+    if (/^tel:/i.test(href)) {
+      const phone = href.replace(/^tel:/i, '').replace(/\s+/g, ' ').trim();
+      if (phone) phones.push(phone);
+    }
+  }
+
+  return {
+    emails: extractEmails(emails.join(' ')),
+    phones: [...new Set(phones)],
+  };
+}
+
+function jsonLdObjectsFromHtml(html) {
+  const objects = [];
+  const regex = /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let match;
+
+  function pushObject(value) {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      value.forEach(pushObject);
+      return;
+    }
+    if (typeof value !== 'object') return;
+    if (Array.isArray(value['@graph'])) {
+      value['@graph'].forEach(pushObject);
+    }
+    objects.push(value);
+  }
+
+  while ((match = regex.exec(String(html || ''))) !== null) {
+    try {
+      pushObject(JSON.parse(decodeEntities(match[1]).trim()));
+    } catch {
+      // Ignore invalid schema payloads.
+    }
+  }
+
+  return objects;
+}
+
+function schemaValue(value) {
+  if (Array.isArray(value)) {
+    return schemaValue(value[0]);
+  }
+  if (value && typeof value === 'object') {
+    return value.name || value.url || value['@id'] || '';
+  }
+  return String(value || '').trim();
+}
+
+function organizationDataFromHtml(html) {
+  const orgTypes = new Set(['organization', 'localbusiness', 'corporation', 'professionalservice', 'store']);
+  const result = {
+    name: '',
+    website: '',
+    email: '',
+    phone: '',
+    description: '',
+    address: '',
+    city: '',
+    postcode: '',
+    country: '',
+    same_as: [],
+  };
+
+  for (const object of jsonLdObjectsFromHtml(html)) {
+    const rawTypes = Array.isArray(object['@type']) ? object['@type'] : [object['@type']];
+    const types = rawTypes.map((type) => String(type || '').toLowerCase());
+    if (!types.some((type) => orgTypes.has(type))) {
+      continue;
+    }
+
+    result.name ||= cleanCompanyName(schemaValue(object.name));
+    result.website ||= schemaValue(object.url);
+    result.email ||= schemaValue(object.email);
+    result.phone ||= schemaValue(object.telephone);
+    result.description ||= schemaValue(object.description);
+
+    const address = object.address && typeof object.address === 'object' ? object.address : {};
+    const street = schemaValue(address.streetAddress);
+    result.city ||= schemaValue(address.addressLocality);
+    result.postcode ||= schemaValue(address.postalCode);
+    result.country ||= schemaValue(address.addressCountry);
+    result.address ||= [street, result.postcode, result.city].filter(Boolean).join(' ');
+
+    const sameAs = Array.isArray(object.sameAs) ? object.sameAs : [object.sameAs];
+    for (const link of sameAs) {
+      const url = schemaValue(link);
+      if (/^https?:\/\//i.test(url)) {
+        result.same_as.push({ url, text: result.name || 'sameAs' });
+      }
+    }
+  }
+
+  result.same_as = result.same_as.filter((link, index, all) => all.findIndex((candidate) => normalizedLinkKey(candidate.url) === normalizedLinkKey(link.url)) === index);
+  return result;
+}
+
 function normalizeSourceType(value) {
   const type = String(value || '').toLowerCase().replace(/[^a-z0-9_/-]+/g, '_');
   if (['ranking', 'directory', 'industry_page', 'list', 'listing'].includes(type)) {
@@ -768,6 +879,72 @@ function classifyEnrichmentLinks(links) {
   return mapped
     .filter((link, index, all) => all.findIndex((candidate) => normalizedLinkKey(candidate.url) === normalizedLinkKey(link.url)) === index)
     .slice(0, 20);
+}
+
+function isLikelyLinkedInCompanyUrl(url) {
+  return /linkedin\.com\/(?:company|school|showcase)\//i.test(String(url || ''));
+}
+
+function isLikelyLinkedInPersonUrl(url) {
+  return /linkedin\.com\/(?:in|pub)\//i.test(String(url || ''));
+}
+
+function linkedinCompanyLinks(links, companyName = '') {
+  const companyKey = normalizeLooseLabel(companyName);
+  return links
+    .filter((link) => isLikelyLinkedInCompanyUrl(link.url))
+    .filter((link) => {
+      if (!companyKey) return true;
+      const haystack = normalizeLooseLabel(`${link.text || ''} ${link.url || ''}`);
+      const companyParts = companyKey.split(' ').filter((part) => part.length >= 4);
+      return companyParts.length === 0 || companyParts.some((part) => haystack.includes(part));
+    })
+    .map((link) => ({
+      link_type: 'linkedin',
+      url: link.url,
+      title: link.text || `${companyName} LinkedIn`,
+    }))
+    .filter((link, index, all) => all.findIndex((candidate) => normalizedLinkKey(candidate.url) === normalizedLinkKey(link.url)) === index)
+    .slice(0, 5);
+}
+
+function knownResearchPathUrls(websiteUrl) {
+  if (!websiteUrl) {
+    return [];
+  }
+
+  let origin = '';
+  try {
+    origin = new URL(websiteUrl).origin;
+  } catch {
+    return [];
+  }
+
+  const paths = [
+    '/contact',
+    '/contact/',
+    '/over-ons',
+    '/over-ons/',
+    '/over',
+    '/over/',
+    '/wie-zijn-wij',
+    '/wie-zijn-wij/',
+    '/about',
+    '/about/',
+    '/team',
+    '/team/',
+    '/mensen',
+    '/directie',
+    '/management',
+    '/leadership',
+    '/werken-bij',
+    '/werken-bij/',
+    '/vacatures',
+    '/careers',
+    '/jobs',
+  ];
+
+  return paths.map((path) => `${origin}${path}`);
 }
 
 function isSkippableResearchUrl(url) {
@@ -1322,6 +1499,7 @@ async function searchResultUrls(query, timeoutSeconds, fetched, errors, pageCach
   const searchUrls = [
     `https://www.google.com/search?q=${encodedQuery}&num=10`,
     `https://duckduckgo.com/html/?q=${encodedQuery}`,
+    `https://www.bing.com/search?q=${encodedQuery}`,
   ];
   const results = [];
 
@@ -1374,7 +1552,9 @@ async function discoverSocialLinksBySearch(companyName, timeoutSeconds, fetched,
   }
 
   const queries = [
-    `"${companyName}" LinkedIn`,
+    `site:linkedin.com/company "${companyName}"`,
+    `site:linkedin.com/school "${companyName}"`,
+    `"${companyName}" LinkedIn company`,
     `"${companyName}" Facebook Instagram`,
   ];
   const links = [];
@@ -1390,6 +1570,9 @@ async function discoverSocialLinksBySearch(companyName, timeoutSeconds, fetched,
       if (!/(linkedin\.com|facebook\.com|instagram\.com|x\.com|twitter\.com|youtube\.com|tiktok\.com)/.test(haystack)) {
         continue;
       }
+      if (/linkedin\.com\//i.test(haystack) && !isLikelyLinkedInCompanyUrl(url)) {
+        continue;
+      }
 
       links.push({
         url,
@@ -1398,7 +1581,10 @@ async function discoverSocialLinksBySearch(companyName, timeoutSeconds, fetched,
     }
   }
 
-  return classifyEnrichmentLinks(links);
+  return [
+    ...linkedinCompanyLinks(links, companyName),
+    ...classifyEnrichmentLinks(links).filter((link) => !/linkedin\.com/i.test(link.url)),
+  ].filter((link, index, all) => all.findIndex((candidate) => normalizedLinkKey(candidate.url) === normalizedLinkKey(link.url)) === index);
 }
 
 async function discoverPersonLinkedInUrl(personName, companyName, timeoutSeconds, fetched, errors, pageCache, options = {}) {
@@ -1720,18 +1906,23 @@ function businessDescriptionFromHtml(html, text, companyName) {
 
 function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
   const text = stripTags(html);
-  const emails = extractEmails(text);
-  const phones = extractPhones(text);
+  const hrefContact = extractHrefContactData(html);
+  const schemaOrg = organizationDataFromHtml(html);
+  const emails = [...new Set([...extractEmails(text), ...hrefContact.emails, ...extractEmails(schemaOrg.email)])];
+  const phones = [...new Set([...extractPhones(text), ...hrefContact.phones, ...extractPhones(schemaOrg.phone)])];
   const location = extractLocationData(text);
   const links = extractLinks(html, url);
   const companySelector = selectorConfig(config, ['detail', 'company_name'], 'h1, title');
-  const company = cleanCompanyName(extractBySelector(html, companySelector.selector, titleFromHtml(html)) || sourceName || new URL(url).hostname.replace(/^www\./, ''));
-  const description = businessDescriptionFromHtml(html, text, company);
+  const company = cleanCompanyName(schemaOrg.name || extractBySelector(html, companySelector.selector, titleFromHtml(html)) || sourceName || new URL(url).hostname.replace(/^www\./, ''));
+  const description = cleanBusinessDescriptionText(schemaOrg.description, company) || businessDescriptionFromHtml(html, text, company);
   const employeeRange = extractEmployeeRange(text);
   const sAndOEmployees = extractSAndOEmployees(text);
   const potentialOpportunities = extractPotentialOpportunities(text, criteria);
   const branches = findMatchingTerms(criteria.branches, `${company} ${description}`.toLowerCase());
-  const socialLinks = classifyEnrichmentLinks(links).filter((link) => ['linkedin', 'social'].includes(link.link_type));
+  const socialLinks = [
+    ...linkedinCompanyLinks([...links, ...schemaOrg.same_as], company),
+    ...classifyEnrichmentLinks([...links, ...schemaOrg.same_as]).filter((link) => ['linkedin', 'social'].includes(link.link_type)),
+  ].filter((link, index, all) => all.findIndex((candidate) => normalizedLinkKey(candidate.url) === normalizedLinkKey(link.url)) === index);
   const emailHint = emailPatternHint(criteria.email_pattern_example, url);
   const scored = scoreLead({
     company_name: company,
@@ -1753,11 +1944,11 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
     website: url,
     email: emails[0] || '',
     phone: phones[0] || '',
-    address: location.address,
-    postcode: location.postcode,
-    city: location.city,
+    address: schemaOrg.address || location.address,
+    postcode: schemaOrg.postcode || location.postcode,
+    city: schemaOrg.city || location.city,
     province: location.province,
-    country: location.country,
+    country: schemaOrg.country || location.country,
     description,
     industry: branches[0] || '',
     employee_count_text: employeeRange.text,
@@ -1834,9 +2025,21 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
 
     const text = stripTags(page.body);
     const links = extractLinks(page.body, page.url);
+    const hrefContact = extractHrefContactData(page.body);
+    const schemaOrg = organizationDataFromHtml(page.body);
+    const schemaText = [
+      schemaOrg.name,
+      schemaOrg.email,
+      schemaOrg.phone,
+      schemaOrg.address,
+      schemaOrg.city,
+      schemaOrg.postcode,
+      schemaOrg.country,
+      schemaOrg.description,
+    ].filter(Boolean).join(' ');
     researchPages.push({ url: page.url, link_type: linkType, title: title || titleFromHtml(page.body) || linkType, text });
-    allTexts.push(text);
-    allLinks.push(...links);
+    allTexts.push([text, schemaText, hrefContact.emails.join(' '), hrefContact.phones.join(' ')].filter(Boolean).join('\n'));
+    allLinks.push(...links, ...schemaOrg.same_as);
     return { page, text, links };
   }
 
@@ -1847,6 +2050,7 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
 
   let website = lead.website || '';
   if (!website || lead.needs_website_discovery) {
+    await onProgress(`Waterfall ${lead.company_name}: bedrijfswebsite zoeken via bronlinks, domeinkandidaten en zoekresultaten.`);
     website = discoverCompanyWebsite(allLinks, sourceHost) || website;
     if (!website) {
       website = await discoverWebsiteByCompanyName(lead.company_name, timeoutSeconds, fetched, errors, pageCache);
@@ -1859,10 +2063,17 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   }
 
   if (website) {
+    await onProgress(`Waterfall ${lead.company_name}: website gevonden (${website}). Contact-, over-ons-, team- en werken-bij-pagina's worden onderzocht.`);
     const websitePage = await addPage(website, 'website', lead.company_name);
     if (websitePage) {
       const seenUrls = new Set(researchPages.map((page) => normalizedCrawlUrl(page.url)).filter(Boolean));
       const queue = websiteCrawlCandidates(websitePage.links, websitePage.page.url, seenUrls, websiteCrawlMaxPages);
+      for (const fixedUrl of knownResearchPathUrls(websitePage.page.url)) {
+        const normalized = normalizedCrawlUrl(fixedUrl);
+        if (normalized && !seenUrls.has(normalized) && !queue.some((link) => link.url === normalized)) {
+          queue.push({ url: normalized, text: normalized, score: 45 });
+        }
+      }
 
       while (queue.length > 0 && researchPages.length < websiteCrawlMaxPages) {
         const link = queue.shift();
@@ -1917,6 +2128,7 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   managementContacts = uniqueManagementContacts(managementContacts, 12);
 
   const searchEnabled = config.enable_search_discovery !== false;
+  await onProgress(`Waterfall ${lead.company_name}: LinkedIn bedrijfspagina en publieke persoonsprofielen zoeken.`);
   const searchedSocialLinks = await discoverSocialLinksBySearch(lead.company_name, timeoutSeconds, fetched, errors, pageCache, {
     enabled: searchEnabled,
   });
@@ -1987,7 +2199,12 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   const scored = scoreLead(enriched, criteria);
   const emailHint = website ? emailPatternHint(emailPattern, website) : '';
   enriched.criteria_score = scored.score;
-  enriched.criteria_reason = [scored.reason, emailHint ? `e-mailpatroon hint: ${emailHint}` : '', managementContacts.length ? 'leiding/contactpersoon-signalen gevonden' : '']
+  enriched.criteria_reason = [
+    scored.reason,
+    emailHint ? `e-mailpatroon hint: ${emailHint}` : '',
+    managementContacts.length ? 'leiding/contactpersoon-signalen gevonden' : '',
+    socialLinks.some((link) => /linkedin\.com/i.test(link.url)) ? 'LinkedIn bedrijfspagina gevonden' : '',
+  ]
     .filter(Boolean)
     .join('; ');
 
