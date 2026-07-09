@@ -71,7 +71,9 @@ async function main() {
     async (progress) => {
       try {
         const now = Date.now();
-        const shouldPostProgress = lastProgressCallbackAt === 0 || now - lastProgressCallbackAt >= 8000;
+        const includesLeadData = Array.isArray(progress.leads) && progress.leads.length > 0;
+        const includesRunItems = Array.isArray(progress.run_items) && progress.run_items.length > 0;
+        const shouldPostProgress = includesLeadData || includesRunItems || lastProgressCallbackAt === 0 || now - lastProgressCallbackAt >= 8000;
         if (!shouldPostProgress) {
           return;
         }
@@ -84,6 +86,8 @@ async function main() {
           status: 'running',
           message: progress.message,
           stats: progress.stats,
+          leads: Array.isArray(progress.leads) ? progress.leads : [],
+          run_items: Array.isArray(progress.run_items) ? progress.run_items : [],
         });
 
         if (callbackResult.status === 409) {

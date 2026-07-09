@@ -1833,9 +1833,16 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
   const fetched = [];
   const leads = [];
   const errors = [];
+  let reportedErrorCount = 0;
   const pageCache = new Map();
 
-  async function progress(message) {
+  function pendingErrorRunItems() {
+    const newErrors = errors.slice(reportedErrorCount);
+    reportedErrorCount = errors.length;
+    return newErrors.map((error) => runItemFromErrorMessage(error));
+  }
+
+  async function progress(message, extra = {}) {
     await onProgress({
       message,
       stats: {
@@ -1843,6 +1850,7 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
         items_found: leads.length,
         errors_count: errors.length,
       },
+      ...extra,
     });
   }
 
@@ -1912,7 +1920,9 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
       config,
       criteria,
     }));
-    await progress('Bedrijfswebsite als één lead aangemaakt. Interne pagina\'s worden aan deze lead toegevoegd.');
+    await progress('Bedrijfswebsite als één lead aangemaakt. Interne pagina\'s worden aan deze lead toegevoegd.', {
+      leads: leads.slice(),
+    });
   } else if (sourceRows.length > 0) {
     for (const row of sourceRows.slice(0, 150)) {
       const builder = tableRows.length > 0 ? buildLeadFromTableRow : buildLeadFromListingCandidate;
@@ -1923,7 +1933,9 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
         criteria,
       }));
     }
-    await progress(`${leads.length} kandidaat-leads uit ${tableRows.length > 0 ? 'tabel' : 'lijst'} gevonden.`);
+    await progress(`${leads.length} kandidaat-leads uit ${tableRows.length > 0 ? 'tabel' : 'lijst'} gevonden. Ze worden alvast opgeslagen voordat de verrijking start.`, {
+      leads: leads.slice(),
+    });
   } else {
     const links = filterLinks(extractLinks(first.body, baseUrl), config, baseHost)
       .slice(0, Math.max(0, maxPages - 1));
@@ -1935,7 +1947,9 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
       config,
       criteria,
     }));
-    await progress('Hoofdpagina verwerkt. Detailpagina\'s worden nu opgehaald.');
+    await progress('Hoofdpagina verwerkt. De eerste kandidaat-lead wordt alvast opgeslagen.', {
+      leads: leads.slice(),
+    });
 
     for (const link of links) {
       try {
@@ -1961,7 +1975,10 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
         errors.push(fetchErrorMessage(error, link.url));
       }
 
-      await progress(`${fetched.length} pagina's opgehaald, ${leads.length} kandidaat-leads gevonden.`);
+      await progress(`${fetched.length} pagina's opgehaald, ${leads.length} kandidaat-leads gevonden.`, {
+        leads: leads.slice(),
+        run_items: pendingErrorRunItems(),
+      });
     }
   }
 
@@ -1983,7 +2000,10 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
       onProgress: progress,
       pageCache,
     });
-    await progress(`Waterfall verrijking: ${index + 1}/${Math.min(leads.length, researchLimit)} bedrijven onderzocht.`);
+    await progress(`Waterfall verrijking: ${index + 1}/${Math.min(leads.length, researchLimit)} bedrijven onderzocht.`, {
+      leads: [leads[index]],
+      run_items: pendingErrorRunItems(),
+    });
   }
 
   const uniqueLeads = leads.filter((lead, index, all) => {
