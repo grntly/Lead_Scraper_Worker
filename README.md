@@ -7,6 +7,7 @@ Deze worker start vanuit een publieke bron-URL en gebruikt daarna een beperkte w
 - bestaande `src/server.mjs` worker kan blijven bestaan
 - workflow wordt gestart via `workflow_dispatch`
 - worker haalt een publieke lijst-URL op
+- worker kan ook starten vanuit een handmatige `company_list` met bedrijfsnamen in `config_json.company_names`
 - worker blokkeert localhost/private IP targets
 - worker krijgt het Grantly brontype mee en behandelt rankings/directories anders dan een losse bedrijfswebsite
 - worker detecteert kandidaat-bedrijven uit tabellen, bronpagina's en detailpagina's

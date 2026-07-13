@@ -523,7 +523,7 @@ function organizationDataFromHtml(html) {
 
 function normalizeSourceType(value) {
   const type = String(value || '').toLowerCase().replace(/[^a-z0-9_/-]+/g, '_');
-  if (['ranking', 'directory', 'industry_page', 'list', 'listing'].includes(type)) {
+  if (['ranking', 'directory', 'industry_page', 'list', 'listing', 'company_list'].includes(type)) {
     return type;
   }
 
@@ -536,6 +536,23 @@ function sourceTypeIsListing(sourceType) {
 
 function sourceTypeIsSingleWebsite(sourceType) {
   return ['website', 'company_website', 'company'].includes(normalizeSourceType(sourceType));
+}
+
+function sourceTypeIsCompanyList(sourceType) {
+  return normalizeSourceType(sourceType) === 'company_list';
+}
+
+function companyNamesFromConfig(config = {}) {
+  const rawNames = Array.isArray(config.company_names)
+    ? config.company_names
+    : String(config.company_names || '')
+      .split(/\r\n|\r|\n|;/);
+
+  return rawNames
+    .map((name) => cleanCompanyName(name))
+    .filter((name) => looksLikeCompanyName(name))
+    .filter((name, index, all) => all.findIndex((candidate) => normalizeLooseLabel(candidate) === normalizeLooseLabel(name)) === index)
+    .slice(0, 250);
 }
 
 function extractCells(rowHtml) {
@@ -1785,6 +1802,42 @@ function buildLeadFromListingCandidate({ row, sourceName, pageUrl, criteria }) {
   };
 }
 
+function buildLeadFromCompanyName({ companyName, sourceName, criteria }) {
+  const haystack = `${companyName} ${sourceName || ''}`.toLowerCase();
+  const matchedBranches = findMatchingTerms(criteria.branches, haystack);
+  const matchedKeywords = findMatchingTerms(criteria.keywords, haystack);
+  const excluded = findMatchingTerms(criteria.exclude_keywords, haystack);
+  let criteriaScore = 45;
+  const reasons = ['bedrijfsnaam uit handmatige lijst'];
+
+  if (matchedBranches.length) {
+    criteriaScore += Math.min(15, matchedBranches.length * 5);
+    reasons.push(`branche-match: ${matchedBranches.join(', ')}`);
+  }
+  if (matchedKeywords.length) {
+    criteriaScore += Math.min(15, matchedKeywords.length * 5);
+    reasons.push(`keywords: ${matchedKeywords.join(', ')}`);
+  }
+  if (excluded.length) {
+    criteriaScore -= 30;
+    reasons.push(`uitsluiting: ${excluded.join(', ')}`);
+  }
+
+  return {
+    company_name: companyName,
+    website: '',
+    industry: matchedBranches[0] || '',
+    description: `Bedrijf aangeleverd via ${sourceName || 'handmatige bedrijfsnamenlijst'}.`,
+    criteria_score: Math.max(0, Math.min(100, criteriaScore)),
+    criteria_reason: reasons.join('; '),
+    enrichment_links: [],
+    source_url: '',
+    raw_payload: { company_name: companyName, source_type: 'company_list' },
+    needs_website_discovery: true,
+    status: 'new',
+  };
+}
+
 async function fetchHtml(url, timeoutSeconds) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutSeconds * 1000);
@@ -2217,7 +2270,6 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
   const sourceType = normalizeSourceType(payload.source_type || config.source_type || 'website');
   const maxPages = clampNumber(payload.max_pages, 5, 1, 20);
   const timeoutSeconds = clampNumber(payload.timeout_seconds, 30, 5, 120);
-  const startUrl = await assertPublicUrl(payload.list_url);
   const fetched = [];
   const leads = [];
   const errors = [];
@@ -2249,131 +2301,167 @@ export async function runLeadScrape(payload, onProgress = async () => {}) {
     });
   }
 
-  let first;
-  try {
-    first = await fetchHtml(startUrl.toString(), timeoutSeconds);
-  } catch (error) {
-    const message = fetchErrorMessage(error, startUrl.toString());
-    return {
-      success: false,
-      message,
-      stats: {
-        pages_fetched: fetched.length,
-        items_found: 0,
-        errors_count: 1,
-      },
-      leads: [],
-      run_items: [{
-        detail_url: startUrl.toString(),
-        raw_title: payload.source_name || startUrl.hostname,
-        status: 'failed',
-        error_text: message,
-      }],
-    };
-  }
-  fetched.push(first.url);
-  pageCache.set(startUrl.toString(), first);
-  pageCache.set(first.url, first);
-  await progress(sourceTypeIsSingleWebsite(sourceType)
-    ? 'Bedrijfswebsite opgehaald. De website wordt nu als één lead onderzocht.'
-    : 'Lijstpagina opgehaald. Links en bedrijven worden nu geanalyseerd.');
+  let listingLike = false;
 
-  if (!first.ok) {
-    const message = `${sourceTypeIsSingleWebsite(sourceType) ? 'Website' : 'Lijstpagina'} gaf HTTP ${first.status}.`;
-    return {
-      success: false,
-      message,
-      stats: {
-        pages_fetched: 1,
-        items_found: 0,
-        errors_count: 1,
-      },
-      leads: [],
-      run_items: [{
-        detail_url: first.url,
-        raw_title: payload.source_name || first.url,
-        status: 'failed',
-        http_code: first.status,
-        error_text: message,
-      }],
-    };
-  }
+  if (sourceTypeIsCompanyList(sourceType)) {
+    const companyNames = companyNamesFromConfig(config);
+    if (companyNames.length === 0) {
+      return {
+        success: false,
+        message: 'Geen bruikbare bedrijfsnamen gevonden in deze bron.',
+        stats: {
+          pages_fetched: 0,
+          items_found: 0,
+          errors_count: 1,
+        },
+        leads: [],
+        run_items: [{
+          raw_title: payload.source_name || 'Bedrijfsnamenlijst',
+          status: 'failed',
+          error_text: 'Vul minimaal één bedrijfsnaam in.',
+        }],
+      };
+    }
 
-  const baseUrl = payload.base_url || startUrl.toString();
-  const baseHost = new URL(baseUrl).hostname.replace(/^www\./, '');
-  const isSingleWebsiteSource = sourceTypeIsSingleWebsite(sourceType);
-  const tableRows = isSingleWebsiteSource ? [] : extractTableRows(first.body, first.url);
-  const listingLike = !isSingleWebsiteSource && pageLooksLikeListing(first.body, sourceType);
-  const listRows = listingLike ? extractListCompanyCandidates(first.body, first.url) : [];
-  const sourceRows = tableRows.length > 0 ? tableRows : listRows;
-
-  if (isSingleWebsiteSource) {
-    leads.push(buildLeadFromPage({
-      sourceName: payload.source_name,
-      url: first.url,
-      html: first.body,
-      config,
-      criteria,
-    }));
-    await progress('Bedrijfswebsite als één lead aangemaakt. Interne pagina\'s worden aan deze lead toegevoegd.', {
-      leads: leads.slice(),
-    });
-  } else if (sourceRows.length > 0) {
-    for (const row of sourceRows.slice(0, 150)) {
-      const builder = tableRows.length > 0 ? buildLeadFromTableRow : buildLeadFromListingCandidate;
-      leads.push(builder({
-        row,
+    for (const companyName of companyNames) {
+      leads.push(buildLeadFromCompanyName({
+        companyName,
         sourceName: payload.source_name,
-        pageUrl: first.url,
         criteria,
       }));
     }
-    await progress(`${leads.length} kandidaat-leads uit ${tableRows.length > 0 ? 'tabel' : 'lijst'} gevonden. Ze worden alvast opgeslagen voordat de verrijking start.`, {
+
+    await progress(`${leads.length} bedrijfsnamen uit de lijst geladen. Per bedrijf wordt nu website, socials en contactinformatie gezocht.`, {
       leads: leads.slice(),
     });
   } else {
-    const links = filterLinks(extractLinks(first.body, baseUrl), config, baseHost)
-      .slice(0, Math.max(0, maxPages - 1));
+    const startUrl = await assertPublicUrl(payload.list_url);
+    let first;
+    try {
+      first = await fetchHtml(startUrl.toString(), timeoutSeconds);
+    } catch (error) {
+      const message = fetchErrorMessage(error, startUrl.toString());
+      return {
+        success: false,
+        message,
+        stats: {
+          pages_fetched: fetched.length,
+          items_found: 0,
+          errors_count: 1,
+        },
+        leads: [],
+        run_items: [{
+          detail_url: startUrl.toString(),
+          raw_title: payload.source_name || startUrl.hostname,
+          status: 'failed',
+          error_text: message,
+        }],
+      };
+    }
+    fetched.push(first.url);
+    pageCache.set(startUrl.toString(), first);
+    pageCache.set(first.url, first);
+    await progress(sourceTypeIsSingleWebsite(sourceType)
+      ? 'Bedrijfswebsite opgehaald. De website wordt nu als één lead onderzocht.'
+      : 'Lijstpagina opgehaald. Links en bedrijven worden nu geanalyseerd.');
 
-    leads.push(buildLeadFromPage({
-      sourceName: payload.source_name,
-      url: first.url,
-      html: first.body,
-      config,
-      criteria,
-    }));
-    await progress('Hoofdpagina verwerkt. De eerste kandidaat-lead wordt alvast opgeslagen.', {
-      leads: leads.slice(),
-    });
+    if (!first.ok) {
+      const message = `${sourceTypeIsSingleWebsite(sourceType) ? 'Website' : 'Lijstpagina'} gaf HTTP ${first.status}.`;
+      return {
+        success: false,
+        message,
+        stats: {
+          pages_fetched: 1,
+          items_found: 0,
+          errors_count: 1,
+        },
+        leads: [],
+        run_items: [{
+          detail_url: first.url,
+          raw_title: payload.source_name || first.url,
+          status: 'failed',
+          http_code: first.status,
+          error_text: message,
+        }],
+      };
+    }
 
-    for (const link of links) {
-      try {
-        await assertPublicUrl(link.url);
-        const page = await fetchHtml(link.url, timeoutSeconds);
-        if (!fetched.includes(page.url)) {
-          fetched.push(page.url);
-        }
-        pageCache.set(link.url, page);
-        pageCache.set(page.url, page);
-        if (page.ok) {
-          leads.push(buildLeadFromPage({
-            sourceName: link.text || payload.source_name,
-            url: page.url,
-            html: page.body,
-            config,
-            criteria,
-          }));
-        } else {
-          errors.push(`HTTP ${page.status}: ${link.url}`);
-        }
-      } catch (error) {
-        errors.push(fetchErrorMessage(error, link.url));
-      }
+    const baseUrl = payload.base_url || startUrl.toString();
+    const baseHost = new URL(baseUrl).hostname.replace(/^www\./, '');
+    const isSingleWebsiteSource = sourceTypeIsSingleWebsite(sourceType);
+    const tableRows = isSingleWebsiteSource ? [] : extractTableRows(first.body, first.url);
+    listingLike = !isSingleWebsiteSource && pageLooksLikeListing(first.body, sourceType);
+    const listRows = listingLike ? extractListCompanyCandidates(first.body, first.url) : [];
+    const sourceRows = tableRows.length > 0 ? tableRows : listRows;
 
-      await progress(`${fetched.length} pagina's opgehaald, ${leads.length} kandidaat-leads gevonden.`, {
+    if (isSingleWebsiteSource) {
+      leads.push(buildLeadFromPage({
+        sourceName: payload.source_name,
+        url: first.url,
+        html: first.body,
+        config,
+        criteria,
+      }));
+      await progress('Bedrijfswebsite als één lead aangemaakt. Interne pagina\'s worden aan deze lead toegevoegd.', {
         leads: leads.slice(),
-        run_items: pendingErrorRunItems(),
       });
+    } else if (sourceRows.length > 0) {
+      for (const row of sourceRows.slice(0, 150)) {
+        const builder = tableRows.length > 0 ? buildLeadFromTableRow : buildLeadFromListingCandidate;
+        leads.push(builder({
+          row,
+          sourceName: payload.source_name,
+          pageUrl: first.url,
+          criteria,
+        }));
+      }
+      await progress(`${leads.length} kandidaat-leads uit ${tableRows.length > 0 ? 'tabel' : 'lijst'} gevonden. Ze worden alvast opgeslagen voordat de verrijking start.`, {
+        leads: leads.slice(),
+      });
+    } else {
+      const links = filterLinks(extractLinks(first.body, baseUrl), config, baseHost)
+        .slice(0, Math.max(0, maxPages - 1));
+
+      leads.push(buildLeadFromPage({
+        sourceName: payload.source_name,
+        url: first.url,
+        html: first.body,
+        config,
+        criteria,
+      }));
+      await progress('Hoofdpagina verwerkt. De eerste kandidaat-lead wordt alvast opgeslagen.', {
+        leads: leads.slice(),
+      });
+
+      for (const link of links) {
+        try {
+          await assertPublicUrl(link.url);
+          const page = await fetchHtml(link.url, timeoutSeconds);
+          if (!fetched.includes(page.url)) {
+            fetched.push(page.url);
+          }
+          pageCache.set(link.url, page);
+          pageCache.set(page.url, page);
+          if (page.ok) {
+            leads.push(buildLeadFromPage({
+              sourceName: link.text || payload.source_name,
+              url: page.url,
+              html: page.body,
+              config,
+              criteria,
+            }));
+          } else {
+            errors.push(`HTTP ${page.status}: ${link.url}`);
+          }
+        } catch (error) {
+          errors.push(fetchErrorMessage(error, link.url));
+        }
+
+        await progress(`${fetched.length} pagina's opgehaald, ${leads.length} kandidaat-leads gevonden.`, {
+          leads: leads.slice(),
+          run_items: pendingErrorRunItems(),
+        });
+      }
     }
   }
 

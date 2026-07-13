@@ -11,6 +11,10 @@ function optional(name, fallback = '') {
   return value === undefined || value === '' ? fallback : value;
 }
 
+function normalizedSourceType() {
+  return optional('SOURCE_TYPE', 'website').toLowerCase().replace(/[^a-z0-9_/-]+/g, '_');
+}
+
 async function postCallback(callbackUrl, callbackToken, payload) {
   const res = await fetch(callbackUrl, {
     method: 'POST',
@@ -34,9 +38,11 @@ async function postCallback(callbackUrl, callbackToken, payload) {
 async function main() {
   required('RUN_ID', process.env.RUN_ID);
   required('SOURCE_ID', process.env.SOURCE_ID);
-  required('LIST_URL', process.env.LIST_URL);
   required('CALLBACK_URL', process.env.CALLBACK_URL);
   required('CALLBACK_TOKEN', process.env.CALLBACK_TOKEN);
+  if (normalizedSourceType() !== 'company_list') {
+    required('LIST_URL', process.env.LIST_URL);
+  }
 
   const runId = Number(process.env.RUN_ID);
   const sourceId = Number(process.env.SOURCE_ID);
@@ -61,7 +67,7 @@ async function main() {
       source_id: sourceId,
       source_name: optional('SOURCE_NAME'),
       source_type: optional('SOURCE_TYPE'),
-      list_url: process.env.LIST_URL,
+      list_url: optional('LIST_URL'),
       base_url: optional('BASE_URL'),
       config_json: optional('CONFIG_JSON', '{}'),
       criteria_json: optional('CRITERIA_JSON', '{}'),

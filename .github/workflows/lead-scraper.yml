@@ -13,11 +13,11 @@ on:
         description: "Source name"
         required: false
       source_type:
-        description: "Source type: website, ranking, directory, industry_page or custom"
+        description: "Source type: website, ranking, directory, industry_page, company_list or custom"
         required: false
       list_url:
-        description: "Public list URL to fetch"
-        required: true
+        description: "Public list URL to fetch, optional for company_list"
+        required: false
       base_url:
         description: "Base URL for relative links"
         required: false
