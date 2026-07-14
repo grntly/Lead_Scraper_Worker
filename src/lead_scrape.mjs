@@ -92,6 +92,19 @@ function decodeEntities(value) {
     .replace(/&gt;/g, '>');
 }
 
+function htmlToReadableLines(html) {
+  return decodeEntities(String(html || '')
+    .replace(/<\s*br\s*\/?>/gi, '\n')
+    .replace(/<\/\s*(p|div|section|article|li|tr|td|th|h[1-6])\s*>/gi, '\n')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' '))
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
 const NON_COMPANY_LABELS = new Set([
   'home',
   'contact',
@@ -128,6 +141,30 @@ const NON_PERSON_WORDS = [
   'contact', 'nieuwsbrief', 'download', 'downloads', 'routebeschrijving',
   'updates', 'bedrijfscertificaat', 'home', 'macroscope',
 ];
+
+const RELEVANT_CONTACT_ROLES = [
+  'ceo', 'cfo', 'cto', 'coo', 'chief executive officer', 'chief financial officer', 'chief technology officer',
+  'directeur', 'algemeen directeur', 'commercieel directeur', 'financieel directeur', 'technisch directeur',
+  'managing director', 'founder', 'co-founder', 'oprichter', 'mede-oprichter', 'eigenaar', 'owner',
+  'partner', 'directie', 'management', 'bestuur', 'bestuurder',
+  'sales director', 'sales manager', 'accountmanager', 'account manager', 'business development',
+  'commercieel manager', 'marketing manager', 'head of sales', 'head of marketing',
+  'hr manager', 'recruiter', 'recruitment', 'people manager', 'operations manager',
+  'finance manager', 'controller', 'subsidieadviseur', 'consultant', 'adviseur',
+];
+
+const GENERIC_CONTACT_LOCALS = new Set([
+  'info', 'sales', 'support', 'admin', 'contact', 'hello', 'hoi', 'mail', 'office',
+  'noreply', 'no-reply', 'privacy', 'marketing', 'facturen', 'invoice', 'debiteuren',
+]);
+
+const rolePatternSource = RELEVANT_CONTACT_ROLES
+  .map((role) => role.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  .join('|');
+
+function relevantRolePattern(flags = 'i') {
+  return new RegExp(rolePatternSource, flags);
+}
 
 function normalizeLooseLabel(value) {
   return String(value || '')
@@ -519,6 +556,43 @@ function organizationDataFromHtml(html) {
 
   result.same_as = result.same_as.filter((link, index, all) => all.findIndex((candidate) => normalizedLinkKey(candidate.url) === normalizedLinkKey(link.url)) === index);
   return result;
+}
+
+function personDataFromHtml(html, domain, emailPattern = '') {
+  const people = [];
+
+  for (const object of jsonLdObjectsFromHtml(html)) {
+    const rawTypes = Array.isArray(object['@type']) ? object['@type'] : [object['@type']];
+    const types = rawTypes.map((type) => String(type || '').toLowerCase());
+    if (!types.includes('person')) {
+      continue;
+    }
+
+    const name = cleanContactName(schemaValue(object.name));
+    if (!looksLikePersonName(name)) {
+      continue;
+    }
+
+    const role = schemaValue(object.jobTitle) || schemaValue(object.roleName) || '';
+    const email = schemaValue(object.email).replace(/^mailto:/i, '').toLowerCase();
+    const phone = schemaValue(object.telephone);
+    const sameAs = Array.isArray(object.sameAs) ? object.sameAs : [object.sameAs];
+    const linkedinUrl = sameAs.map(schemaValue).find((url) => isLikelyLinkedInPersonUrl(url)) || '';
+    const guesses = emailGuessesForName(name, domain, emailPattern);
+
+    people.push({
+      name,
+      role,
+      source_text: [name, role].filter(Boolean).join(' - '),
+      email_guess: email || guesses[0] || '',
+      phone,
+      linkedin_url: linkedinUrl,
+      source_type: 'schema_person',
+      relevance_score: contactRelevanceScore({ name, role, email_guess: email || guesses[0] || '', linkedin_url: linkedinUrl }),
+    });
+  }
+
+  return people;
 }
 
 function normalizeSourceType(value) {
@@ -1247,20 +1321,33 @@ function isGenericContactLabel(contact) {
   }
 
   const exactGenericTerms = [
-    'info',
-    'sales',
-    'support',
-    'contact',
     'nieuwsbrief',
     'personeel subsidies',
   ];
 
-  if (exactGenericTerms.includes(name) || exactGenericTerms.includes(local)) {
+  if (GENERIC_CONTACT_LOCALS.has(name) || GENERIC_CONTACT_LOCALS.has(local) || exactGenericTerms.includes(name) || exactGenericTerms.includes(local)) {
     return true;
   }
 
   return ['load more', 'read more', 'all downloads']
     .some((term) => name.includes(term) || local.includes(term) || role.includes(term));
+}
+
+function contactRelevanceScore(contact) {
+  const role = String(contact.role || '').toLowerCase();
+  const source = String(contact.source_text || '').toLowerCase();
+  const email = String(contact.email_guess || contact.email || '').trim();
+  let score = 0;
+
+  if (looksLikePersonName(contact.name || '')) score += 25;
+  if (email && !GENERIC_CONTACT_LOCALS.has(email.replace(/@.+$/, '').replace(/[._-]+/g, ' '))) score += 18;
+  if (contact.phone) score += 8;
+  if (contact.linkedin_url) score += 15;
+  if (relevantRolePattern('i').test(`${role} ${source}`)) score += 30;
+  if (/\b(ceo|cfo|cto|directeur|founder|oprichter|eigenaar|owner|partner|bestuurder)\b/i.test(`${role} ${source}`)) score += 15;
+  if (/\b(stage|student|junior|stagiair|assistant|secretaresse)\b/i.test(`${role} ${source}`)) score -= 15;
+
+  return Math.max(0, Math.min(100, score));
 }
 
 function uniqueManagementContacts(contacts, limit = 10) {
@@ -1278,7 +1365,18 @@ function uniqueManagementContacts(contacts, limit = 10) {
       role: String(contact.role || '').trim(),
       source_text: String(contact.source_text || '').trim(),
       email_guess: String(contact.email_guess || '').trim().toLowerCase(),
+      phone: String(contact.phone || '').trim(),
+      linkedin_url: String(contact.linkedin_url || '').trim(),
+      source_type: String(contact.source_type || '').trim(),
     };
+    cleaned.relevance_score = Number.isFinite(Number(contact.relevance_score))
+      ? Number(contact.relevance_score)
+      : contactRelevanceScore(cleaned);
+
+    if (cleaned.relevance_score < 35) {
+      continue;
+    }
+
     const nameKey = normalizeContactNameKey(cleaned.name);
     const key = cleaned.email_guess || nameKey;
 
@@ -1293,7 +1391,7 @@ function uniqueManagementContacts(contacts, limit = 10) {
     }
   }
 
-  return unique;
+  return unique.sort((a, b) => (b.relevance_score || 0) - (a.relevance_score || 0));
 }
 
 function bestEmailForContact(contact, emails) {
@@ -1354,14 +1452,131 @@ function contactsFromEmails(emails, domain) {
     .filter(Boolean);
 }
 
+function nameFromEmailLocal(local) {
+  const parts = String(local || '')
+    .split(/[._-]+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 2);
+
+  if (parts.length < 2) {
+    return '';
+  }
+
+  return parts.map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ');
+}
+
+function nearbyEmailForLine(line, emails) {
+  const direct = extractEmails(line)[0] || '';
+  if (direct) {
+    return direct;
+  }
+
+  const normalized = normalizeLooseLabel(line);
+  for (const email of emails) {
+    const local = String(email || '').replace(/@.+$/, '').replace(/[._-]+/g, ' ');
+    if (local && normalized.includes(normalizeLooseLabel(local))) {
+      return email;
+    }
+  }
+
+  return '';
+}
+
+function extractRelevantContactsFromText(text, domain, emailPattern = '') {
+  const rolePattern = relevantRolePattern('i');
+  const lines = String(text || '')
+    .split(/\n|\r|[;|•]/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter((line) => line.length >= 5 && line.length <= 260);
+  const emails = extractEmails(text);
+  const contacts = [];
+
+  for (let index = 0; index < lines.length; index++) {
+    const windowText = [lines[index - 1] || '', lines[index], lines[index + 1] || '']
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!rolePattern.test(windowText) && !extractEmails(windowText).length) {
+      continue;
+    }
+
+    const role = (windowText.match(rolePattern) || [''])[0];
+    const names = windowText.match(/\b[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'’-]{2,}(?:\s+(?:van|de|den|der|het|ter|ten|op|aan|du|la|le|von|of))?(?:\s+[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'’-]{2,}){1,3}\b/g) || [];
+    const email = nearbyEmailForLine(windowText, emails);
+    const fallbackName = email ? nameFromEmailLocal(email.replace(/@.+$/, '')) : '';
+
+    for (const rawName of [...names, fallbackName].filter(Boolean)) {
+      const name = cleanContactName(rawName);
+      if (!looksLikePersonName(name) || rolePattern.test(name)) {
+        continue;
+      }
+
+      const guesses = emailGuessesForName(name, domain, emailPattern);
+      contacts.push({
+        name,
+        role,
+        source_text: windowText,
+        email_guess: email || guesses[0] || '',
+        phone: extractPhones(windowText)[0] || '',
+        source_type: role ? 'role_context' : 'email_context',
+        relevance_score: contactRelevanceScore({ name, role, source_text: windowText, email_guess: email || guesses[0] || '' }),
+      });
+    }
+  }
+
+  return uniqueManagementContacts(contacts, 20);
+}
+
+function contactsFromLinkedInPersonLinks(links, companyName = '') {
+  const contacts = [];
+
+  for (const link of links) {
+    if (!isLikelyLinkedInPersonUrl(link.url)) {
+      continue;
+    }
+
+    const linkText = cleanContactName(link.text || '');
+    let name = looksLikePersonName(linkText) ? linkText : '';
+
+    if (!name) {
+      const match = String(link.url || '').match(/linkedin\.com\/(?:in|pub)\/([^/?#]+)/i);
+      if (match) {
+        const slugName = cleanContactName(rawurldecodeSafe(match[1]).replace(/[-_]+/g, ' '));
+        if (looksLikePersonName(slugName)) {
+          name = slugName;
+        }
+      }
+    }
+
+    if (!name) {
+      continue;
+    }
+
+    contacts.push({
+      name,
+      role: '',
+      source_text: `${companyName} LinkedIn person`,
+      email_guess: '',
+      linkedin_url: link.url,
+      source_type: 'linkedin_person',
+      relevance_score: contactRelevanceScore({ name, linkedin_url: link.url, source_text: companyName }),
+    });
+  }
+
+  return uniqueManagementContacts(contacts, 20);
+}
+
+function rawurldecodeSafe(value) {
+  try {
+    return decodeURIComponent(String(value || ''));
+  } catch {
+    return String(value || '');
+  }
+}
+
 function extractManagementContacts(text, domain, emailPattern = '') {
-  const roles = [
-    'ceo', 'cfo', 'cto', 'coo', 'chief executive officer', 'chief financial officer', 'chief technology officer',
-    'directeur', 'algemeen directeur', 'commercieel directeur', 'financieel directeur', 'technisch directeur',
-    'founder', 'co-founder', 'oprichter', 'mede-oprichter', 'eigenaar', 'owner', 'partner',
-    'managing director', 'directie', 'bestuurder'
-  ];
-  const rolePattern = roles.map((role) => role.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const rolePattern = rolePatternSource;
   const lines = String(text || '')
     .split(/[.\n\r;|]+/)
     .map((line) => line.replace(/\s+/g, ' ').trim())
@@ -1631,9 +1846,21 @@ async function discoverPersonLinkedInUrl(personName, companyName, timeoutSeconds
 }
 
 function scoreLead(lead, criteria) {
-  let score = 30;
+  let score = 25;
   const reasons = [];
-  const haystack = `${lead.company_name} ${lead.description} ${lead.industry} ${lead.city || ''} ${lead.province || ''} ${lead.address || ''}`.toLowerCase();
+  const contacts = Array.isArray(lead.management_contacts) ? lead.management_contacts : [];
+  const opportunities = Array.isArray(lead.potential_opportunities) ? lead.potential_opportunities : [];
+  const links = Array.isArray(lead.social_links) ? lead.social_links : (Array.isArray(lead.enrichment_links) ? lead.enrichment_links : []);
+  const haystack = [
+    lead.company_name,
+    lead.description,
+    lead.industry,
+    lead.city || '',
+    lead.province || '',
+    lead.address || '',
+    opportunities.join(' '),
+    contacts.map((contact) => `${contact.name || ''} ${contact.role || ''} ${contact.source_text || ''}`).join(' '),
+  ].join(' ').toLowerCase();
 
   if (lead.website) {
     score += 20;
@@ -1650,6 +1877,18 @@ function scoreLead(lead, criteria) {
   if (lead.city || lead.address) {
     score += 5;
     reasons.push('locatie/adres gevonden');
+  }
+  if (links.some((link) => /linkedin\.com\/(?:company|school|showcase)\//i.test(String(link.url || '')))) {
+    score += 10;
+    reasons.push('LinkedIn bedrijfspagina gevonden');
+  }
+  if (contacts.length > 0) {
+    score += Math.min(20, contacts.length * 6);
+    reasons.push(`${contacts.length} relevante contactpersoon-signalen`);
+  }
+  if (opportunities.length > 0) {
+    score += Math.min(12, opportunities.length * 4);
+    reasons.push(`kansen: ${opportunities.slice(0, 3).join(', ')}`);
   }
 
   const matched = findMatchingTerms(criteria.keywords, haystack);
@@ -1671,7 +1910,7 @@ function scoreLead(lead, criteria) {
   }
 
   const minEmployees = Number(criteria.min_employees || 0);
-  if (minEmployees > 0 && lead.employee_count_min !== null) {
+  if (minEmployees > 0 && lead.employee_count_min !== null && lead.employee_count_min !== undefined) {
     if (lead.employee_count_min >= minEmployees || (lead.employee_count_max !== null && lead.employee_count_max >= minEmployees)) {
       score += 15;
       reasons.push(`medewerkers >= ${minEmployees}`);
@@ -1679,6 +1918,10 @@ function scoreLead(lead, criteria) {
       score -= 15;
       reasons.push(`medewerkers < ${minEmployees}`);
     }
+  }
+
+  if (lead.employee_count_min === null || lead.employee_count_min === undefined) {
+    reasons.push('medewerkers onbekend');
   }
 
   return {
@@ -2077,9 +2320,12 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     }
 
     const text = stripTags(page.body);
+    const readableLines = htmlToReadableLines(page.body);
     const links = extractLinks(page.body, page.url);
     const hrefContact = extractHrefContactData(page.body);
     const schemaOrg = organizationDataFromHtml(page.body);
+    const pageDomain = hostWithoutWww(website || page.url);
+    const schemaPeople = personDataFromHtml(page.body, pageDomain, emailPattern);
     const schemaText = [
       schemaOrg.name,
       schemaOrg.email,
@@ -2090,9 +2336,16 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
       schemaOrg.country,
       schemaOrg.description,
     ].filter(Boolean).join(' ');
-    researchPages.push({ url: page.url, link_type: linkType, title: title || titleFromHtml(page.body) || linkType, text });
-    allTexts.push([text, schemaText, hrefContact.emails.join(' '), hrefContact.phones.join(' ')].filter(Boolean).join('\n'));
+    researchPages.push({ url: page.url, link_type: linkType, title: title || titleFromHtml(page.body) || linkType, text: readableLines || text });
+    allTexts.push([readableLines, text, schemaText, hrefContact.emails.join(' '), hrefContact.phones.join(' ')].filter(Boolean).join('\n'));
     allLinks.push(...links, ...schemaOrg.same_as);
+    allLinks.push(...schemaPeople.filter((person) => person.linkedin_url).map((person) => ({
+      url: person.linkedin_url,
+      text: person.name,
+    })));
+    for (const person of schemaPeople) {
+      allTexts.push(`${person.name} ${person.role} ${person.email_guess} ${person.phone} ${person.linkedin_url}`.trim());
+    }
     return { page, text, links };
   }
 
@@ -2170,13 +2423,19 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   const branches = findMatchingTerms(criteria.branches, `${lead.company_name} ${combinedText}`.toLowerCase());
   const domain = website ? hostWithoutWww(website) : '';
   let managementContacts = uniqueManagementContacts([
+    ...extractRelevantContactsFromText(combinedText, domain, emailPattern),
     ...extractManagementContacts(combinedText, domain, emailPattern),
     ...extractRoleSignals(combinedText, domain, emailPattern),
     ...contactsFromEmails(emails, domain),
+    ...contactsFromLinkedInPersonLinks(allLinks, lead.company_name),
   ], 12);
   managementContacts = managementContacts.map((contact) => ({
     ...contact,
     email_guess: bestEmailForContact(contact, emails),
+  }));
+  managementContacts = managementContacts.map((contact) => ({
+    ...contact,
+    relevance_score: contactRelevanceScore(contact),
   }));
   managementContacts = uniqueManagementContacts(managementContacts, 12);
 
