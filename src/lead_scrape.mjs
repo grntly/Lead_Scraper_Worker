@@ -1025,6 +1025,10 @@ function knownResearchPathUrls(websiteUrl) {
     '/about/',
     '/team',
     '/team/',
+    '/blog/medewerkers',
+    '/blog/medewerkers/',
+    '/medewerkers',
+    '/medewerkers/',
     '/mensen',
     '/directie',
     '/management',
@@ -1167,6 +1171,7 @@ function researchLinkScore(link) {
   if (/contact|contacteer|kontakt/.test(haystack)) score += 40;
   if (/over-ons|over_ons|about|wie-zijn-wij|wie_zijn_wij|organisatie|company|bedrijf|ons-verhaal|our-story/.test(haystack)) score += 35;
   if (/team|mensen|people|medewerkers|directie|management|bestuur|leadership|founder|ceo|cfo|cto|eigenaar|oprichter|partners|adviesraad/.test(haystack)) score += 55;
+  if (/\/(blog\/)?(medewerker|medewerkers|team|people|persoon|author)\//i.test(haystack)) score += 75;
   if (/vacature|werken-bij|werkenbij|career|careers|jobs/.test(haystack)) score += 18;
   if (/diensten|services|solutions|oplossingen|expertise|cases|portfolio|projecten/.test(haystack)) score += 12;
   if (/privacy|voorwaarden|terms|cookie|login|account|cart|winkelwagen/.test(haystack)) score -= 50;
@@ -1297,6 +1302,21 @@ function cleanContactName(name) {
     .replace(/\s+/g, ' ')
     .replace(/\b([a-z])([A-ZÀ-ÖØ-Þ])/g, '$1 $2')
     .trim();
+}
+
+function titleCasePersonName(name) {
+  return cleanContactName(name)
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => {
+      if (/^(van|de|den|der|het|ter|ten|op|aan|du|la|le|von|of)$/i.test(part)) {
+        return part;
+      }
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
+    .join(' ')
+    .replace(/\bi\b/g, 'I');
 }
 
 function normalizeContactNameKey(name) {
@@ -1587,7 +1607,7 @@ function personNameFromUrl(url) {
       return '';
     }
 
-    const name = cleanContactName(rawurldecodeSafe(slug).replace(/[-_]+/g, ' '));
+    const name = titleCasePersonName(rawurldecodeSafe(slug).replace(/[-_]+/g, ' '));
     return looksLikePersonName(name) ? name : '';
   } catch {
     return '';
@@ -1601,14 +1621,18 @@ function personNameFromPage(url, html, readableText) {
   }
 
   const introMatch = String(readableText || '').match(/\b(?:mijn naam is|ik ben|meet the team:?)\s+([A-ZÀ-ÖØ-Þ][\p{L}'’-]+(?:\s+[A-ZÀ-ÖØ-Þ][\p{L}'’-]+){1,3})/iu);
-  if (introMatch && looksLikePersonName(introMatch[1])) {
-    return cleanContactName(introMatch[1]);
+  if (introMatch) {
+    const introName = titleCasePersonName(introMatch[1]);
+    if (looksLikePersonName(introName)) {
+      return introName;
+    }
   }
 
   const title = titleFromHtml(html)
     .replace(/\s*[-–|:]\s*.*$/g, '')
     .trim();
-  return looksLikePersonName(title) ? cleanContactName(title) : '';
+  const titleName = titleCasePersonName(title);
+  return looksLikePersonName(titleName) ? titleName : '';
 }
 
 function profilePhoneFromText(text) {
@@ -1670,6 +1694,79 @@ function contactsFromProfilePage({ url, html, readableText, links, domain, email
       source_text: readableText,
     }),
   }], 1);
+}
+
+function isLikelyInternalPersonUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return /\/(blog\/)?(medewerker|medewerkers|team|people|persoon|author)\//i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function contactsFromInternalPersonLinks(links, companyName = '') {
+  const contacts = [];
+
+  for (const link of links || []) {
+    if (!isLikelyInternalPersonUrl(link.url)) {
+      continue;
+    }
+
+    const linkName = titleCasePersonName(link.text || '');
+    const urlName = personNameFromUrl(link.url);
+    const name = looksLikePersonName(linkName) ? linkName : urlName;
+    if (!name) {
+      continue;
+    }
+
+    contacts.push({
+      name,
+      role: '',
+      source_text: `${companyName} team/profiel link ${link.url}`.trim(),
+      email_guess: '',
+      phone: '',
+      linkedin_url: '',
+      profile_url: link.url,
+      source_type: 'internal_person_link',
+      relevance_score: 48,
+    });
+  }
+
+  return uniqueManagementContacts(contacts, 30);
+}
+
+function contactsFromTeamText(readableText, pageUrl, companyName = '') {
+  const context = `${pageUrl} ${readableText}`.toLowerCase();
+  if (!/\b(team|over ons|medewerker|medewerkers|people|wie zijn wij|directie|consultants)\b/i.test(context)) {
+    return [];
+  }
+
+  const contacts = [];
+  const lines = String(readableText || '')
+    .split(/\n|\r/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter((line) => line.length >= 5 && line.length <= 80);
+
+  for (const line of lines) {
+    const cleaned = titleCasePersonName(line.replace(/\b(lees meer|bekijk profiel|contact|linkedin)\b/gi, ' '));
+    if (!looksLikePersonName(cleaned)) {
+      continue;
+    }
+
+    contacts.push({
+      name: cleaned,
+      role: roleFromProfileText(line),
+      source_text: `${companyName} teamtekst ${line}`.trim(),
+      email_guess: '',
+      phone: '',
+      linkedin_url: '',
+      source_type: 'team_text',
+      relevance_score: 40,
+    });
+  }
+
+  return uniqueManagementContacts(contacts, 30);
 }
 
 function mergeContactDetails(contacts) {
@@ -2510,6 +2607,8 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
       emailPattern,
       companyName: lead.company_name,
     });
+    const linkedPersonContacts = contactsFromInternalPersonLinks(links, lead.company_name);
+    const teamTextContacts = contactsFromTeamText(readableLines || text, page.url, lead.company_name);
     const schemaText = [
       schemaOrg.name,
       schemaOrg.email,
@@ -2530,7 +2629,7 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     for (const person of schemaPeople) {
       allTexts.push(`${person.name} ${person.role} ${person.email_guess} ${person.phone} ${person.linkedin_url}`.trim());
     }
-    allPageContacts.push(...schemaPeople, ...profileContacts);
+    allPageContacts.push(...schemaPeople, ...profileContacts, ...linkedPersonContacts, ...teamTextContacts);
     return { page, text, links };
   }
 
