@@ -150,7 +150,8 @@ const RELEVANT_CONTACT_ROLES = [
   'sales director', 'sales manager', 'accountmanager', 'account manager', 'business development',
   'commercieel manager', 'marketing manager', 'head of sales', 'head of marketing',
   'hr manager', 'recruiter', 'recruitment', 'people manager', 'operations manager',
-  'finance manager', 'controller', 'subsidieadviseur', 'consultant', 'adviseur',
+  'finance manager', 'controller', 'subsidieadviseur', 'subsidie consultant', 'subsidieconsultant',
+  'consultant', 'adviseur',
 ];
 
 const GENERIC_CONTACT_LOCALS = new Set([
@@ -1575,6 +1576,159 @@ function rawurldecodeSafe(value) {
   }
 }
 
+function personNameFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    const slug = parts[parts.length - 1] || '';
+    const context = parts.slice(0, -1).join('/');
+
+    if (!/(medewerker|medewerkers|team|people|persoon|author|blog)/i.test(context) || !slug) {
+      return '';
+    }
+
+    const name = cleanContactName(rawurldecodeSafe(slug).replace(/[-_]+/g, ' '));
+    return looksLikePersonName(name) ? name : '';
+  } catch {
+    return '';
+  }
+}
+
+function personNameFromPage(url, html, readableText) {
+  const urlName = personNameFromUrl(url);
+  if (urlName) {
+    return urlName;
+  }
+
+  const introMatch = String(readableText || '').match(/\b(?:mijn naam is|ik ben|meet the team:?)\s+([A-ZÀ-ÖØ-Þ][\p{L}'’-]+(?:\s+[A-ZÀ-ÖØ-Þ][\p{L}'’-]+){1,3})/iu);
+  if (introMatch && looksLikePersonName(introMatch[1])) {
+    return cleanContactName(introMatch[1]);
+  }
+
+  const title = titleFromHtml(html)
+    .replace(/\s*[-–|:]\s*.*$/g, '')
+    .trim();
+  return looksLikePersonName(title) ? cleanContactName(title) : '';
+}
+
+function profilePhoneFromText(text) {
+  const value = String(text || '');
+  const direct = value.match(/telefoon(?:nummer)?\s*:?\s*((?:\+31|0031|0)[\d\s().-]{8,})/i);
+  if (direct) {
+    return direct[1].replace(/\s+/g, ' ').trim();
+  }
+
+  const phones = extractPhones(value);
+  const mobile = phones.find((phone) => /(?:\+31|0031|0)\s*6/i.test(phone.replace(/[().-]/g, ' ')));
+  return mobile || phones[0] || '';
+}
+
+function roleFromProfileText(text) {
+  const rolePattern = relevantRolePattern('i');
+  const lines = String(text || '')
+    .split(/\n|\r|[.!?]/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const match = line.match(rolePattern);
+    if (match) {
+      return match[0];
+    }
+  }
+
+  return '';
+}
+
+function contactsFromProfilePage({ url, html, readableText, links, domain, emailPattern, companyName }) {
+  const name = personNameFromPage(url, html, readableText);
+  if (!name) {
+    return [];
+  }
+
+  const pageEmails = extractEmails(readableText);
+  const guesses = emailGuessesForName(name, domain, emailPattern);
+  const email = bestEmailForContact({ name, email_guess: guesses[0] || '' }, pageEmails);
+  const linkedin = (links || []).find((link) => isLikelyLinkedInPersonUrl(link.url));
+  const phone = profilePhoneFromText(readableText);
+  const role = roleFromProfileText(readableText);
+
+  return uniqueManagementContacts([{
+    name,
+    role,
+    source_text: `${companyName || ''} ${url} ${String(readableText || '').slice(0, 300)}`.trim(),
+    email_guess: email,
+    phone,
+    linkedin_url: linkedin ? linkedin.url : '',
+    source_type: 'person_profile',
+    relevance_score: contactRelevanceScore({
+      name,
+      role,
+      email_guess: email,
+      phone,
+      linkedin_url: linkedin ? linkedin.url : '',
+      source_text: readableText,
+    }),
+  }], 1);
+}
+
+function mergeContactDetails(contacts) {
+  const merged = [];
+  const seen = new Map();
+
+  for (const contact of contacts) {
+    if (!contact || isGenericContactLabel(contact)) {
+      continue;
+    }
+
+    const cleaned = {
+      ...contact,
+      name: cleanContactName(contact.name || ''),
+      role: String(contact.role || '').trim(),
+      email_guess: String(contact.email_guess || contact.email || '').trim().toLowerCase(),
+      phone: String(contact.phone || '').trim(),
+      linkedin_url: String(contact.linkedin_url || '').trim(),
+      source_text: String(contact.source_text || '').trim(),
+      source_type: String(contact.source_type || '').trim(),
+    };
+    cleaned.relevance_score = Number.isFinite(Number(contact.relevance_score))
+      ? Number(contact.relevance_score)
+      : contactRelevanceScore(cleaned);
+
+    const nameKey = normalizeContactNameKey(cleaned.name);
+    const emailKey = cleaned.email_guess;
+    const key = emailKey || nameKey;
+    if (!key) {
+      continue;
+    }
+
+    const existingIndex = seen.has(key)
+      ? seen.get(key)
+      : merged.findIndex((item) => {
+        const itemNameKey = normalizeContactNameKey(item.name);
+        return nameKey && itemNameKey && (itemNameKey === nameKey || itemNameKey.includes(nameKey) || nameKey.includes(itemNameKey));
+      });
+
+    if (existingIndex >= 0) {
+      const existing = merged[existingIndex];
+      existing.role ||= cleaned.role;
+      existing.email_guess ||= cleaned.email_guess;
+      existing.phone ||= cleaned.phone;
+      existing.linkedin_url ||= cleaned.linkedin_url;
+      existing.source_type ||= cleaned.source_type;
+      existing.source_text = [existing.source_text, cleaned.source_text].filter(Boolean).join(' | ').slice(0, 800);
+      existing.relevance_score = Math.max(existing.relevance_score || 0, cleaned.relevance_score || 0);
+      seen.set(existing.email_guess || normalizeContactNameKey(existing.name), existingIndex);
+      continue;
+    }
+
+    seen.set(key, merged.length);
+    merged.push(cleaned);
+  }
+
+  return uniqueManagementContacts(merged, 20);
+}
+
 function extractManagementContacts(text, domain, emailPattern = '') {
   const rolePattern = rolePatternSource;
   const lines = String(text || '')
@@ -1986,7 +2140,7 @@ function buildLeadFromTableRow({ row, sourceName, pageUrl, criteria }) {
   return {
     company_name: row.company_name,
     website: '',
-    industry: matchedBranches[0] || 'ICT / software',
+    industry: inferIndustry(`${row.company_name} ${descriptionParts.join(' ')}`, criteria) || matchedBranches[0] || '',
     description: descriptionParts.join('; '),
     criteria_score: criteriaScore,
     criteria_reason: reasons.join('; ') || 'gevonden in rankingtabel',
@@ -2200,6 +2354,26 @@ function businessDescriptionFromHtml(html, text, companyName) {
   return cleanBusinessDescriptionText(text, companyName) || meta || String(text || '').slice(0, 700);
 }
 
+function inferIndustry(text, criteria = {}) {
+  const haystack = normalizeLooseLabel(text);
+  const prioritized = [
+    ['Subsidieadvies / consultancy', /\b(subsidie|subsidies|wbso|s o|innovatiebox|subsidieadvies|subsidieadviseur|subsidieconsultant|formule naar innovatie)\b/i],
+    ['Consultancy / advies', /\b(consultancy|advies|adviseur|consultant|begeleiding|sparren)\b/i],
+    ['Duurzaamheid / energie', /\b(duurzaam|verduurzaming|energie|co2|circular|circulair|klimaat)\b/i],
+    ['ICT / software', /\b(software|saas|cloud|cybersecurity|ict|it|data|erp|platform)\b/i],
+    ['Maakindustrie', /\b(maakindustrie|productie|machinebouw|techniek|hardware|fysieke ontwikkeling)\b/i],
+  ];
+
+  for (const [label, pattern] of prioritized) {
+    if (pattern.test(haystack)) {
+      return label;
+    }
+  }
+
+  const branches = findMatchingTerms(criteria.branches, haystack);
+  return branches[0] || '';
+}
+
 function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
   const text = stripTags(html);
   const hrefContact = extractHrefContactData(html);
@@ -2214,7 +2388,7 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
   const employeeRange = extractEmployeeRange(text);
   const sAndOEmployees = extractSAndOEmployees(text);
   const potentialOpportunities = extractPotentialOpportunities(text, criteria);
-  const branches = findMatchingTerms(criteria.branches, `${company} ${description}`.toLowerCase());
+  const industry = inferIndustry(`${company} ${description} ${text.slice(0, 6000)}`, criteria);
   const socialLinks = [
     ...linkedinCompanyLinks([...links, ...schemaOrg.same_as], company),
     ...classifyEnrichmentLinks([...links, ...schemaOrg.same_as]).filter((link) => ['linkedin', 'social'].includes(link.link_type)),
@@ -2230,7 +2404,7 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
     province: location.province,
     country: location.country,
     description,
-    industry: branches[0] || '',
+    industry,
     employee_count_min: employeeRange.min,
     employee_count_max: employeeRange.max,
   }, criteria);
@@ -2246,7 +2420,7 @@ function buildLeadFromPage({ sourceName, url, html, config, criteria }) {
     province: location.province,
     country: schemaOrg.country || location.country,
     description,
-    industry: branches[0] || '',
+    industry,
     employee_count_text: employeeRange.text,
     employee_count_min: employeeRange.min,
     employee_count_max: employeeRange.max,
@@ -2306,6 +2480,7 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   const researchPages = [];
   const allLinks = [];
   const allTexts = [];
+  const allPageContacts = [];
   const emailPattern = criteria.email_pattern_example || '';
   const websiteCrawlMaxPages = clampNumber(config.website_crawl_max_pages || criteria.website_crawl_max_pages, 50, 1, 100);
 
@@ -2326,6 +2501,15 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     const schemaOrg = organizationDataFromHtml(page.body);
     const pageDomain = hostWithoutWww(website || page.url);
     const schemaPeople = personDataFromHtml(page.body, pageDomain, emailPattern);
+    const profileContacts = contactsFromProfilePage({
+      url: page.url,
+      html: page.body,
+      readableText: readableLines || text,
+      links,
+      domain: pageDomain,
+      emailPattern,
+      companyName: lead.company_name,
+    });
     const schemaText = [
       schemaOrg.name,
       schemaOrg.email,
@@ -2346,6 +2530,7 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     for (const person of schemaPeople) {
       allTexts.push(`${person.name} ${person.role} ${person.email_guess} ${person.phone} ${person.linkedin_url}`.trim());
     }
+    allPageContacts.push(...schemaPeople, ...profileContacts);
     return { page, text, links };
   }
 
@@ -2420,24 +2605,25 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
   const employeeRange = extractEmployeeRange(combinedText);
   const sAndOEmployees = extractSAndOEmployees(combinedText);
   const potentialOpportunities = extractPotentialOpportunities(`${lead.description || ''}\n${combinedText}`, criteria);
-  const branches = findMatchingTerms(criteria.branches, `${lead.company_name} ${combinedText}`.toLowerCase());
+  const inferredIndustry = inferIndustry(`${lead.company_name} ${lead.description || ''} ${combinedText}`, criteria);
   const domain = website ? hostWithoutWww(website) : '';
-  let managementContacts = uniqueManagementContacts([
+  let managementContacts = mergeContactDetails([
+    ...allPageContacts,
     ...extractRelevantContactsFromText(combinedText, domain, emailPattern),
     ...extractManagementContacts(combinedText, domain, emailPattern),
     ...extractRoleSignals(combinedText, domain, emailPattern),
     ...contactsFromEmails(emails, domain),
     ...contactsFromLinkedInPersonLinks(allLinks, lead.company_name),
-  ], 12);
+  ]);
   managementContacts = managementContacts.map((contact) => ({
     ...contact,
-    email_guess: bestEmailForContact(contact, emails),
+    email_guess: bestEmailForContact(contact, emails) || contact.email_guess,
   }));
   managementContacts = managementContacts.map((contact) => ({
     ...contact,
     relevance_score: contactRelevanceScore(contact),
   }));
-  managementContacts = uniqueManagementContacts(managementContacts, 12);
+  managementContacts = mergeContactDetails(managementContacts).slice(0, 12);
 
   const searchEnabled = config.enable_search_discovery !== false;
   await onProgress(`Waterfall ${lead.company_name}: LinkedIn bedrijfspagina en publieke persoonsprofielen zoeken.`);
@@ -2489,7 +2675,7 @@ async function enrichLeadWithWaterfall({ lead, payload, config, criteria, timeou
     city: lead.city || location.city || '',
     province: lead.province || location.province || '',
     country: lead.country || location.country || '',
-    industry: lead.industry || branches[0] || '',
+    industry: inferredIndustry || lead.industry || '',
     description: descriptionParts.join('\n\n').slice(0, 1800) || lead.description,
     employee_count_text: lead.employee_count_text || employeeRange.text,
     employee_count_min: lead.employee_count_min ?? employeeRange.min,
